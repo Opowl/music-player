@@ -2,6 +2,8 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+val buildNum = (project.findProperty("buildNum") as String?)?.toIntOrNull() ?: 1
+
 android {
     namespace = "com.example.offlineplayer"
     compileSdk = 34
@@ -9,8 +11,8 @@ android {
         applicationId = "com.example.offlineplayer"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = buildNum
+        versionName = "build $buildNum"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

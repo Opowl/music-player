@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
+@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 
 package com.example.offlineplayer
 
@@ -23,9 +23,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -58,6 +60,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import androidx.core.content.pm.PackageInfoCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
@@ -95,6 +99,11 @@ class LibNav {
     var artist by mutableStateOf<String?>(null)
     var album by mutableStateOf<String?>(null)
 }
+
+fun fileKey(u: String): String = try {
+    val x = Uri.parse(u)
+    x.authority + "|" + DocumentsContract.getDocumentId(x)
+} catch (e: Exception) { u }
 
 fun folderName(f: String): String = try {
     DocumentsContract.getTreeDocumentId(Uri.parse(f)).substringAfter(':').ifBlank { "Internal storage" }
@@ -169,6 +178,11 @@ class PlayerVM(app: Application) : AndroidViewModel(app) {
     var scanDone by mutableIntStateOf(0)
     var scanTotal by mutableIntStateOf(0)
     var scanMsg by mutableStateOf("")
+    val selected = mutableStateListOf<String>()
+    var selDialog by mutableIntStateOf(0)
+    var updateMsg by mutableStateOf("")
+    var updateUrl by mutableStateOf<String?>(null)
+    var updateBusy by mutableStateOf(false)
 
     init { load(); connect() }
 
@@ -322,25 +336,145 @@ class PlayerVM(app: Application) : AndroidViewModel(app) {
             val found = withContext(Dispatchers.IO) {
                 folders.toList().flatMap { try { scanTree(Uri.parse(it)) } catch (e: Exception) { emptyList() } }
             }
-            val known = library.map { it.uri }.toHashSet()
-            val fresh = found.filter { it.toString() !in known }.distinct()
+            val known = library.map { fileKey(it.uri) }.toHashSet()
+            val fresh = found.filter { fileKey(it.toString()) !in known }.distinctBy { fileKey(it.toString()) }
             scanTotal = fresh.size
             var added = 0
             for (u in fresh) {
                 val song = withContext(Dispatchers.IO) { readTags(u) }
-                val dup = library.any {
-                    it.title.equals(song.title, true) && it.artist.equals(song.artist, true) && it.album.equals(song.album, true)
-                }
-                if (!dup) { library.add(song); added++ }
+                library.add(song)
+                added++
                 scanDone++
                 if (scanDone % 25 == 0) save()
             }
             save()
             scanning = false
-            scanMsg = if (added == 0) "No new songs found" else "Added $added new songs"
+            val removed = dedupeLibrary()
+            scanMsg = (if (added == 0) "No new songs found" else "Added $added new songs") +
+                (if (removed > 0) ", removed $removed duplicates" else "")
             findInfo()
             delay(5000)
             scanMsg = ""
+        }
+    }
+
+    private fun dedupeLibrary(): Int {
+        val seen = HashMap<String, Song>()
+        val drop = ArrayList<Song>()
+        for (s in library.toList()) {
+            val k = fileKey(s.uri)
+            if (seen.containsKey(k)) drop.add(s) else seen[k] = s
+        }
+        if (drop.isEmpty()) return 0
+        for (d in drop) {
+            val keep = seen[fileKey(d.uri)] ?: continue
+            for (i in playlists.indices) {
+                if (d.uri in playlists[i].uris) {
+                    playlists[i] = playlists[i].copy(uris = playlists[i].uris.map { u -> if (u == d.uri) keep.uri else u }.distinct())
+                }
+            }
+            library.remove(d)
+        }
+        save()
+        return drop.size
+    }
+
+    // ---------- multi-select ----------
+    fun toggleSel(uri: String) { if (uri in selected) selected.remove(uri) else selected.add(uri) }
+
+    fun clearSel() { selected.clear(); selDialog = 0 }
+
+    fun addAllTo(pid: String, uris: List<String>) = update(pid) { p -> p.copy(uris = p.uris + uris.filter { it !in p.uris }) }
+
+    fun removeSongs(uris: Set<String>) {
+        library.removeAll { it.uri in uris }
+        for (i in playlists.indices) playlists[i] = playlists[i].copy(uris = playlists[i].uris.filter { it !in uris })
+        save()
+    }
+
+    fun moveSongs(uris: Set<String>, artist: String, album: String) {
+        val na = artist.trim()
+        val nb = album.trim()
+        val g = if (na.isBlank()) "Unknown artist" else stripFeat(na)
+        val artFrom = library.firstOrNull {
+            it.uri !in uris && it.art != null && it.album.trim().equals(nb, true) && grp(it).equals(g, true)
+        }?.art
+        editWhere({ it.uri in uris }) { s ->
+            val same = na.isBlank() || grp(s).equals(g, true)
+            s.copy(
+                album = nb,
+                albumArtist = if (same) s.albumArtist else stripFeat(na),
+                artist = if (same) s.artist else na,
+                art = artFrom ?: s.art,
+                looked = true
+            )
+        }
+    }
+
+    // ---------- app updates ----------
+    fun installedBuild(): Int = try {
+        PackageInfoCompat.getLongVersionCode(ctx.packageManager.getPackageInfo(ctx.packageName, 0)).toInt()
+    } catch (e: Exception) { 0 }
+
+    fun checkUpdate() {
+        if (updateBusy) return
+        updateBusy = true
+        updateUrl = null
+        updateMsg = "Checking..."
+        viewModelScope.launch {
+            val r = withContext(Dispatchers.IO) { httpGet("https://api.github.com/repos/Opowl/music-player/releases/latest") }
+            val cur = installedBuild()
+            updateMsg = "Couldn't check for updates. Are you online?"
+            if (r != null) {
+                try {
+                    val o = JSONObject(String(r))
+                    val n = o.getString("tag_name").substringAfter("build-").toIntOrNull() ?: 0
+                    var url: String? = null
+                    val assets = o.getJSONArray("assets")
+                    for (i in 0 until assets.length()) {
+                        val a = assets.getJSONObject(i)
+                        if (a.getString("name").endsWith(".apk")) url = a.getString("browser_download_url")
+                    }
+                    if (n > cur && url != null) {
+                        updateUrl = url
+                        updateMsg = "Build $n is available (you have build $cur)"
+                    } else updateMsg = "You're up to date (build $cur)"
+                } catch (e: Exception) { }
+            }
+            updateBusy = false
+        }
+    }
+
+    fun installUpdate() {
+        val url = updateUrl ?: return
+        if (!ctx.packageManager.canRequestPackageInstalls()) {
+            updateMsg = "Allow Offline Player to install apps, then tap Update again."
+            ctx.startActivity(
+                Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + ctx.packageName))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            return
+        }
+        updateBusy = true
+        updateMsg = "Downloading..."
+        viewModelScope.launch {
+            val f = withContext(Dispatchers.IO) {
+                val b = httpGet(url)
+                if (b == null) null else {
+                    val d = File(ctx.cacheDir, "updates").apply { mkdirs() }
+                    val out = File(d, "update.apk")
+                    out.writeBytes(b)
+                    out
+                }
+            }
+            updateBusy = false
+            if (f == null) { updateMsg = "Download failed. Try again."; return@launch }
+            updateMsg = "Opening installer..."
+            val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".fileprovider", f)
+            ctx.startActivity(
+                Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
         }
     }
 
@@ -836,12 +970,14 @@ fun Root(vm: PlayerVM) {
     EditArtistDialog(vm, nav)
     EditAlbumDialog(vm, nav)
     AddToPlaylistDialog(vm)
+    SelectionDialogs(vm)
     if (full) {
         BackHandler { full = false }
         NowPlaying(vm) { full = false }
     } else {
         if (open != null) BackHandler { open = null }
         if (tab == 1 && nav.artist != null) BackHandler { if (nav.album != null) nav.album = null else nav.artist = null }
+        if (vm.selected.isNotEmpty()) BackHandler { vm.clearSel() }
         Scaffold(bottomBar = {
             Column {
                 if (vm.title != null) MiniPlayer(vm) { full = true }
@@ -853,7 +989,7 @@ fun Root(vm: PlayerVM) {
                     ).forEachIndexed { i, (label, icon) ->
                         NavigationBarItem(
                             selected = tab == i,
-                            onClick = { if (i == 1 && tab == 1) { nav.artist = null; nav.album = null }; tab = i; open = null },
+                            onClick = { vm.clearSel(); if (i == 1 && tab == 1) { nav.artist = null; nav.album = null }; tab = i; open = null },
                             icon = { Icon(icon, label) },
                             label = { Text(label) },
                             colors = NavigationBarItemDefaults.colors(
@@ -874,6 +1010,7 @@ fun Root(vm: PlayerVM) {
                     o != null -> PlaylistDetail(vm, o) { open = null }
                     else -> PlaylistsScreen(vm) { open = it }
                 }
+                if (vm.selected.isNotEmpty()) SelectionBar(vm, Modifier.align(Alignment.TopCenter))
             }
         }
     }
@@ -905,10 +1042,16 @@ fun MiniPlayer(vm: PlayerVM, onOpen: () -> Unit) {
 fun MenuItem(text: String, onClick: () -> Unit) = DropdownMenuItem(text = { Text(text) }, onClick = onClick)
 
 @Composable
-fun SongRow(s: Song, onClick: () -> Unit, menu: @Composable (() -> Unit) -> Unit) {
+fun SongRow(
+    s: Song, onClick: () -> Unit, selected: Boolean = false, onLong: (() -> Unit)? = null,
+    menu: @Composable (() -> Unit) -> Unit
+) {
     var show by remember { mutableStateOf(false) }
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 16.dp, top = 4.dp, bottom = 4.dp),
+        Modifier.fillMaxWidth()
+            .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.Transparent)
+            .combinedClickable(onClick = onClick, onLongClick = onLong)
+            .padding(start = 16.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Art(s.art, Modifier.size(48.dp))
@@ -977,7 +1120,7 @@ fun PlaylistDetail(vm: PlayerVM, id: String, onBack: () -> Unit) {
         }
         LazyColumn {
             itemsIndexed(songs) { i, s ->
-                SongRow(s, { vm.play(songs, i) }) { dismiss ->
+                SongRow(s, { if (vm.selected.isNotEmpty()) vm.toggleSel(s.uri) else vm.play(songs, i) }, s.uri in vm.selected, { vm.toggleSel(s.uri) }) { dismiss ->
                     SongMenu(vm, s, dismiss) { MenuItem("Remove from playlist") { vm.toggleInPlaylist(id, s.uri); dismiss() } }
                 }
             }
@@ -1106,7 +1249,7 @@ fun ArtistsScreen(vm: PlayerVM, nav: LibNav) {
                 }
                 if (hitSongs.isNotEmpty()) item { SectionLabel("Songs") }
                 itemsIndexed(hitSongs) { i, s ->
-                    SongRow(s, { vm.play(hitSongs, i) }) { d ->
+                    SongRow(s, { if (vm.selected.isNotEmpty()) vm.toggleSel(s.uri) else vm.play(hitSongs, i) }, s.uri in vm.selected, { vm.toggleSel(s.uri) }) { d ->
                         SongMenu(vm, s, d) { MenuItem("Remove from library") { vm.removeFromLibrary(s); d() } }
                     }
                 }
@@ -1216,7 +1359,13 @@ fun AlbumPage(vm: PlayerVM, nav: LibNav, artist: String, album: String) {
             itemsIndexed(songs) { i, s ->
                 var show by remember { mutableStateOf(false) }
                 Row(
-                    Modifier.fillMaxWidth().clickable { vm.play(songs, i) }.padding(start = 16.dp, top = 6.dp, bottom = 6.dp),
+                    Modifier.fillMaxWidth()
+                        .background(if (s.uri in vm.selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.Transparent)
+                        .combinedClickable(
+                            onClick = { if (vm.selected.isNotEmpty()) vm.toggleSel(s.uri) else vm.play(songs, i) },
+                            onLongClick = { vm.toggleSel(s.uri) }
+                        )
+                        .padding(start = 16.dp, top = 6.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(if (s.track > 0) "${s.track}" else "${i + 1}", Modifier.width(32.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1235,6 +1384,79 @@ fun AlbumPage(vm: PlayerVM, nav: LibNav, artist: String, album: String) {
             }
         }
     }
+}
+
+@Composable
+fun SelectionBar(vm: PlayerVM, modifier: Modifier = Modifier) {
+    Surface(modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceVariant) {
+        Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton({ vm.clearSel() }) { Icon(Icons.Rounded.Close, "Cancel selection") }
+            Text("${vm.selected.size} selected", Modifier.weight(1f))
+            TextButton({ vm.selDialog = 1 }) { Text("Playlist") }
+            TextButton({ vm.selDialog = 2 }) { Text("Move") }
+            IconButton({ vm.selDialog = 3 }) { Icon(Icons.Rounded.Delete, "Delete") }
+        }
+    }
+}
+
+@Composable
+fun SelectionDialogs(vm: PlayerVM) {
+    val n = vm.selected.size
+    if (n == 0) return
+    val sel = vm.selected.toSet()
+    when (vm.selDialog) {
+        1 -> AlertDialog(
+            onDismissRequest = { vm.selDialog = 0 },
+            title = { Text("Add $n songs to playlist") },
+            text = {
+                if (vm.playlists.isEmpty()) Text("Create a playlist first.")
+                else LazyColumn {
+                    items(vm.playlists, key = { it.id }) { p ->
+                        Text(
+                            p.name,
+                            Modifier.fillMaxWidth().clickable { vm.addAllTo(p.id, vm.selected.toList()); vm.clearSel() }.padding(vertical = 12.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = { TextButton({ vm.selDialog = 0 }) { Text("Cancel") } }
+        )
+        2 -> MoveDialog(vm, sel)
+        3 -> AlertDialog(
+            onDismissRequest = { vm.selDialog = 0 },
+            title = { Text("Remove $n songs?") },
+            text = { Text("They're removed from the app and your playlists. Your files aren't deleted, and a folder scan will bring them back.") },
+            confirmButton = { TextButton({ vm.removeSongs(sel); vm.clearSel() }) { Text("Remove") } },
+            dismissButton = { TextButton({ vm.selDialog = 0 }) { Text("Cancel") } }
+        )
+    }
+}
+
+@Composable
+fun MoveDialog(vm: PlayerVM, sel: Set<String>) {
+    val groups = vm.library.filter { it.uri in sel }.map { grp(it) }.distinct()
+    var a by remember { mutableStateOf(if (groups.size == 1 && groups[0] != "Unknown artist") groups[0] else "") }
+    var b by remember { mutableStateOf("") }
+    val sugg = vm.library
+        .filter { it.album.isNotBlank() && (a.isBlank() || grp(it).equals(stripFeat(a), true)) }
+        .map { it.album.trim() }.distinct()
+        .filter { b.isBlank() || (!it.equals(b.trim(), true) && it.contains(b.trim(), true)) }
+        .take(4)
+    AlertDialog(
+        onDismissRequest = { vm.selDialog = 0 },
+        title = { Text("Move ${sel.size} songs") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(a, { a = it }, singleLine = true, label = { Text("Artist") })
+                OutlinedTextField(b, { b = it }, singleLine = true, label = { Text("Album") })
+                sugg.forEach { n ->
+                    Text(n, Modifier.fillMaxWidth().clickable { b = n }.padding(vertical = 6.dp), color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        },
+        confirmButton = { TextButton({ vm.moveSongs(sel, a, b); vm.clearSel() }) { Text("Move") } },
+        dismissButton = { TextButton({ vm.selDialog = 0 }) { Text("Cancel") } }
+    )
 }
 
 @Composable
@@ -1392,6 +1614,15 @@ fun SettingsScreen(vm: PlayerVM) {
             OutlinedButton({ vm.scanFolders() }, enabled = vm.folders.isNotEmpty() && !vm.scanning) {
                 Text(if (vm.scanning) "Scanning..." else "Scan now")
             }
+        }
+        Text("App updates")
+        Text(
+            vm.updateMsg.ifBlank { "Installed: build ${vm.installedBuild()}" },
+            fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton({ vm.checkUpdate() }, enabled = !vm.updateBusy) { Text("Check for updates") }
+            if (vm.updateUrl != null) Button({ vm.installUpdate() }, enabled = !vm.updateBusy) { Text("Update") }
         }
         Button({ confirm = true }) { Text("Clear library") }
     }
