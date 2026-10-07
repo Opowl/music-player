@@ -51,7 +51,13 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.foundation.Image
@@ -68,7 +74,6 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
@@ -1140,7 +1145,7 @@ fun AppTheme(mode: Int, content: @Composable () -> Unit) {
         onSurface = Color.White, onBackground = Color.White, onSurfaceVariant = Color(0xFFB0B0B0),
         surfaceTint = Color.Transparent, outline = Color(0xFF3A3A3A),
         surfaceContainerLowest = Color.Black, surfaceContainerLow = Color(0xFF0A0A0A),
-        surfaceContainer = Color(0xFF101010), surfaceContainerHigh = Color(0xFF161616),
+        surfaceContainer = Color(0xFF101010), surfaceContainerHigh = Color(0xFF1A1A1A),
         surfaceContainerHighest = Color(0xFF1C1C1C)
     ) else lightColorScheme(
         primary = Red, onPrimary = Color.White,
@@ -1148,8 +1153,8 @@ fun AppTheme(mode: Int, content: @Composable () -> Unit) {
         surfaceTint = Color.Transparent
     )
     val shapes = Shapes(
-        extraSmall = RoundedCornerShape(12.dp), small = RoundedCornerShape(14.dp),
-        medium = RoundedCornerShape(18.dp), large = RoundedCornerShape(24.dp), extraLarge = RoundedCornerShape(28.dp)
+        extraSmall = RoundedCornerShape(2.dp), small = RoundedCornerShape(4.dp),
+        medium = RoundedCornerShape(4.dp), large = RoundedCornerShape(6.dp), extraLarge = RoundedCornerShape(6.dp)
     )
     MaterialTheme(colorScheme = scheme, shapes = shapes, content = content)
 }
@@ -1171,36 +1176,37 @@ fun Modifier.card(
 ): Modifier {
     val src = remember { MutableInteractionSource() }
     val pressed by src.collectIsPressedAsState()
-    val scale by animateFloatAsState(
-        if (pressed) 0.97f else 1f,
+    val off by animateFloatAsState(
+        if (pressed) 1f else 0f,
         spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
         label = "press"
     )
     val haptic = LocalHapticFeedback.current
     val c = MaterialTheme.colorScheme
-    val shape = RoundedCornerShape(16.dp)
-    val borderColor = when {
-        selected || playing -> c.primary
-        pressed -> c.onSurface.copy(alpha = 0.3f)
-        else -> c.onSurface.copy(alpha = 0.12f)
-    }
-    val bg = when {
-        selected -> c.primary.copy(alpha = 0.18f)
-        playing -> c.primary.copy(alpha = 0.07f)
-        else -> c.surfaceVariant
-    }
+    val d = LocalDensity.current.density
+    val shape = RoundedCornerShape(4.dp)
+    val bg = if (selected) Color.White else if (playing) c.primary else c.surfaceVariant
+    val shadow = if (playing && !selected) Color.White else c.primary
+    val border = if (selected) c.primary else c.onSurface
     val lc: (() -> Unit)? = if (onLong == null) null else ({ haptic.performHapticFeedback(HapticFeedbackType.LongPress); onLong() })
     return this
-        .graphicsLayer { scaleX = scale; scaleY = scale }
+        .drawBehind { drawRoundRect(shadow, Offset(4f * d, 4f * d), size, CornerRadius(4f * d)) }
+        .graphicsLayer { translationX = off * 3f * d; translationY = off * 3f * d }
         .clip(shape)
         .background(bg)
-        .border(1.dp, borderColor, shape)
+        .border(2.dp, border, shape)
         .combinedClickable(
             interactionSource = src, indication = LocalIndication.current,
             onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); onClick() },
             onLongClick = lc
         )
 }
+
+fun fgOn(selected: Boolean, playing: Boolean): Color =
+    if (selected) Color.Black else if (playing) Color.White else Color.Unspecified
+
+fun subOn(selected: Boolean, playing: Boolean, normal: Color): Color =
+    if (selected) Color(0xFF444444) else if (playing) Color(0xFFFFD9DB) else normal
 
 @Composable
 fun EqBars(color: Color) {
@@ -1226,7 +1232,7 @@ fun rememberGlow(path: String?): Color {
 @Composable
 fun Art(
     path: String?, modifier: Modifier = Modifier, px: Int = 128,
-    shape: Shape = RoundedCornerShape(8.dp), icon: ImageVector = Icons.Rounded.MusicNote
+    shape: Shape = RoundedCornerShape(2.dp), icon: ImageVector = Icons.Rounded.MusicNote
 ) {
     val img by produceState<ImageBitmap?>(null, path, px) {
         value = if (path == null) null else withContext(Dispatchers.IO) { decodeArt(path, px) }
@@ -1262,6 +1268,7 @@ fun Root(vm: PlayerVM) {
             Scaffold(bottomBar = {
                 Column {
                     if (vm.title != null) MiniPlayer(vm) { full = true }
+                    else Box(Modifier.fillMaxWidth().height(2.dp).background(MaterialTheme.colorScheme.onSurface))
                     NavigationBar(containerColor = MaterialTheme.colorScheme.background, tonalElevation = 0.dp) {
                         listOf(
                             "Playlists" to Icons.Rounded.LibraryMusic,
@@ -1274,8 +1281,8 @@ fun Root(vm: PlayerVM) {
                                 icon = { Icon(icon, label) },
                                 label = { Text(label) },
                                 colors = NavigationBarItemDefaults.colors(
-                                    indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
-                                    selectedIconColor = MaterialTheme.colorScheme.primary,
+                                    indicatorColor = MaterialTheme.colorScheme.primary,
+                                    selectedIconColor = Color.White,
                                     selectedTextColor = MaterialTheme.colorScheme.primary
                                 )
                             )
@@ -1311,15 +1318,15 @@ fun Root(vm: PlayerVM) {
 fun MiniPlayer(vm: PlayerVM, onOpen: () -> Unit) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)),
+        shape = RoundedCornerShape(0.dp),
+        border = BorderStroke(2.dp, MaterialTheme.colorScheme.onSurface),
         modifier = Modifier.fillMaxWidth().clickable { onOpen() }
     ) {
         Column {
             Row(Modifier.padding(start = 8.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Art(vm.artPath, Modifier.size(44.dp))
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                    Text(vm.title ?: "", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(vm.title ?: "", fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     if (vm.artist.isNotBlank()) Text(vm.artist, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 IconButton({ vm.controller?.seekToPrevious() }) { Icon(Icons.Rounded.SkipPrevious, "Previous") }
@@ -1329,7 +1336,7 @@ fun MiniPlayer(vm: PlayerVM, onOpen: () -> Unit) {
                 IconButton({ vm.controller?.seekToNext() }) { Icon(Icons.Rounded.SkipNext, "Next") }
             }
             val frac = if (vm.durMs > 0) (vm.posMs.toFloat() / vm.durMs).coerceIn(0f, 1f) else 0f
-            Box(Modifier.fillMaxWidth().height(2.dp).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))) {
+            Box(Modifier.fillMaxWidth().height(4.dp).background(Color(0xFF333333))) {
                 Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(MaterialTheme.colorScheme.primary))
             }
         }
@@ -1345,6 +1352,7 @@ fun SongRow(
     playing: Boolean = false, index: Int = 0, menu: @Composable (() -> Unit) -> Unit
 ) {
     var show by remember { mutableStateOf(false) }
+    val subC = subOn(selected, playing, MaterialTheme.colorScheme.onSurfaceVariant)
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).enter(index)
             .card(selected, playing, onClick, onLong)
@@ -1353,12 +1361,12 @@ fun SongRow(
     ) {
         Art(s.art, Modifier.size(48.dp))
         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-            Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (playing) MaterialTheme.colorScheme.primary else Color.Unspecified)
-            if (s.artist.isNotBlank()) Text(s.artist, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold, color = fgOn(selected, playing))
+            if (s.artist.isNotBlank()) Text(s.artist, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = subC)
         }
-        if (playing) EqBars(MaterialTheme.colorScheme.primary)
+        if (playing) EqBars(if (selected) MaterialTheme.colorScheme.primary else Color.White)
         Box {
-            IconButton({ show = true }) { Icon(Icons.Rounded.MoreVert, "More") }
+            IconButton({ show = true }) { Icon(Icons.Rounded.MoreVert, "More", tint = if (selected) Color.Black else LocalContentColor.current) }
             DropdownMenu(show, { show = false }) { menu { show = false } }
         }
     }
@@ -1381,10 +1389,10 @@ fun PlaylistsScreen(vm: PlayerVM, onOpen: (String) -> Unit) {
     var creating by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Your Playlists", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            FilledTonalButton({ creating = true }) { Text("New playlist") }
+            Text("PLAYLISTS", fontSize = 36.sp, fontWeight = FontWeight.Black, letterSpacing = (-1).sp, modifier = Modifier.weight(1f))
+            Btn({ creating = true }) { Text("New playlist") }
         }
-        if (vm.playlists.isEmpty()) Text("No playlists yet. Tap New playlist to make one.", Modifier.padding(16.dp))
+        if (vm.playlists.isEmpty()) EmptyCard("NO PLAYLISTS YET", "Make your first one and start filling it.", "NEW PLAYLIST") { creating = true }
         LazyColumn {
             itemsIndexed(vm.playlists, key = { _, p -> p.id }) { i, p ->
                 Column(
@@ -1395,6 +1403,7 @@ fun PlaylistsScreen(vm: PlayerVM, onOpen: (String) -> Unit) {
                     Text("${p.uris.size} songs", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+            item { Footer("${vm.playlists.size} PLAYLISTS") }
         }
     }
     if (creating) NameDialog("New playlist", "", { creating = false }) { vm.createPlaylist(it); creating = false }
@@ -1415,9 +1424,9 @@ fun PlaylistDetail(vm: PlayerVM, id: String, onBack: () -> Unit) {
             IconButton({ deleting = true }) { Icon(Icons.Rounded.Delete, "Delete playlist") }
         }
         Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button({ vm.play(songs) }, enabled = songs.isNotEmpty()) { Text("Play") }
-            OutlinedButton({ vm.play(songs, songs.indices.random(), true) }, enabled = songs.isNotEmpty()) { Text("Shuffle") }
-            OutlinedButton({ adding = true }) { Text("Add songs") }
+            Btn({ vm.play(songs) }, enabled = songs.isNotEmpty()) { Text("Play") }
+            OBtn({ vm.play(songs, songs.indices.random(), true) }, enabled = songs.isNotEmpty()) { Text("Shuffle") }
+            OBtn({ adding = true }) { Text("Add songs") }
         }
         LazyColumn {
             itemsIndexed(songs) { i, s ->
@@ -1497,7 +1506,7 @@ fun ArtistRow(vm: PlayerVM, name: String, count: Int, index: Int, onClick: () ->
             .card(onClick = onClick).padding(10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Art(vm.artistArt(name), Modifier.size(56.dp), 160, CircleShape, Icons.Rounded.Person)
+        Art(vm.artistArt(name), Modifier.size(56.dp), 160, RoundedCornerShape(2.dp), Icons.Rounded.Person)
         Column(Modifier.padding(start = 16.dp)) {
             Text(name, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(if (count == 1) "1 song" else "$count songs", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1518,7 +1527,7 @@ fun ArtistsScreen(vm: PlayerVM, nav: LibNav) {
     val ql = q.trim().lowercase()
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Library", fontSize = 26.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text("LIBRARY", fontSize = 36.sp, fontWeight = FontWeight.Black, letterSpacing = (-1).sp, modifier = Modifier.weight(1f))
             IconButton({ searching = !searching; if (!searching) q = "" }) { Icon(Icons.Rounded.Search, "Search") }
             IconButton({ if (vm.folders.isEmpty()) folderPicker.launch(null) else vm.scanFolders() }, enabled = !vm.scanning) {
                 Icon(Icons.Rounded.Refresh, "Scan music folders")
@@ -1537,10 +1546,17 @@ fun ArtistsScreen(vm: PlayerVM, nav: LibNav) {
         )
         if (vm.lookingUp) Text("Looking up songs... ${vm.lookDone}/${vm.lookTotal}", Modifier.padding(horizontal = 16.dp, vertical = 4.dp), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (vm.reviews.isNotEmpty()) TextButton({ review = true }, Modifier.padding(horizontal = 8.dp)) { Text("Review ${vm.reviews.size} matches") }
-        if (vm.library.isEmpty()) Text("Tap + to add songs from your phone.", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (vm.library.isEmpty()) EmptyCard("NO MUSIC YET", "Pick your music folder and the app finds your songs.", "SCAN A FOLDER") {
+            if (vm.folders.isEmpty()) folderPicker.launch(null) else vm.scanFolders()
+        }
+        else if (ql.isEmpty()) Btn(
+            { vm.play(vm.library.toList(), vm.library.indices.random(), true) },
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)
+        ) { Text("SHUFFLE ALL", fontWeight = FontWeight.Black, letterSpacing = 2.sp) }
         LazyColumn {
             if (ql.isEmpty()) {
                 itemsIndexed(artists, key = { _, a -> a.first.lowercase() }) { i, (n, ss) -> ArtistRow(vm, n, ss.size, i) { nav.artist = n; nav.album = null } }
+                item { Footer("${artists.size} ARTISTS - ${vm.library.size} SONGS") }
             } else {
                 val hitArtists = artists.filter { it.first.lowercase().contains(ql) }
                 val hitAlbums = artists.flatMap { (an, ss) ->
@@ -1611,9 +1627,9 @@ fun ArtistPage(vm: PlayerVM, nav: LibNav, artist: String) {
         LazyColumn {
             item {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Art(vm.artistArt(artist), Modifier.size(96.dp), 300, CircleShape, Icons.Rounded.Person)
+                    Art(vm.artistArt(artist), Modifier.size(96.dp), 300, RoundedCornerShape(2.dp), Icons.Rounded.Person)
                     Column(Modifier.padding(start = 16.dp)) {
-                        Text(artist, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(artist, fontSize = 26.sp, fontWeight = FontWeight.Black, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         Text(
                             "${albums.size} ${if (albums.size == 1) "album" else "albums"} - ${songs.size} songs",
                             fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1623,8 +1639,8 @@ fun ArtistPage(vm: PlayerVM, nav: LibNav, artist: String) {
             }
             item {
                 Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button({ vm.play(all) }) { Text("Play") }
-                    OutlinedButton({ vm.play(all, all.indices.random(), true) }) { Text("Shuffle") }
+                    Btn({ vm.play(all) }) { Text("Play") }
+                    OBtn({ vm.play(all, all.indices.random(), true) }) { Text("Shuffle") }
                 }
             }
             itemsIndexed(albums, key = { _, a -> a.first.lowercase() }) { idx, (name, ss) ->
@@ -1662,14 +1678,14 @@ fun AlbumPage(vm: PlayerVM, nav: LibNav, artist: String, album: String) {
             item {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Art(songs.firstOrNull { it.art != null }?.art, Modifier.size(200.dp), 600)
-                    Text(album.ifBlank { "Singles & other" }, Modifier.padding(top = 12.dp), fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    Text(album.ifBlank { "Singles & other" }, Modifier.padding(top = 12.dp), fontSize = 26.sp, fontWeight = FontWeight.Black)
                     Text(artist, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             item {
                 Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button({ vm.play(songs) }) { Text("Play") }
-                    OutlinedButton({ vm.play(songs, songs.indices.random(), true) }) { Text("Shuffle") }
+                    Btn({ vm.play(songs) }) { Text("Play") }
+                    OBtn({ vm.play(songs, songs.indices.random(), true) }) { Text("Shuffle") }
                 }
             }
             itemsIndexed(songs) { i, s ->
@@ -1684,15 +1700,15 @@ fun AlbumPage(vm: PlayerVM, nav: LibNav, artist: String, album: String) {
                         .padding(start = 12.dp, top = 8.dp, bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(if (s.track > 0) "${s.track}" else "${i + 1}", Modifier.width(32.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if (s.track > 0) "${s.track}" else "${i + 1}", Modifier.width(32.dp), fontWeight = FontWeight.Black, color = subOn(s.uri in vm.selected, s.uri == vm.playingUri, MaterialTheme.colorScheme.onSurfaceVariant))
                     Column(Modifier.weight(1f)) {
-                        Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold, color = fgOn(s.uri in vm.selected, s.uri == vm.playingUri))
                         if (s.artist.isNotBlank() && !s.artist.equals(artist, true))
-                            Text(s.artist, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(s.artist, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = subOn(s.uri in vm.selected, s.uri == vm.playingUri, MaterialTheme.colorScheme.onSurfaceVariant))
                     }
-                    if (s.uri == vm.playingUri) EqBars(MaterialTheme.colorScheme.primary)
+                    if (s.uri == vm.playingUri) EqBars(if (s.uri in vm.selected) MaterialTheme.colorScheme.primary else Color.White)
                     Box {
-                        IconButton({ show = true }) { Icon(Icons.Rounded.MoreVert, "More") }
+                        IconButton({ show = true }) { Icon(Icons.Rounded.MoreVert, "More", tint = if (s.uri in vm.selected) Color.Black else LocalContentColor.current) }
                         DropdownMenu(show, { show = false }) {
                             SongMenu(vm, s, { show = false }) { MenuItem("Remove from library") { vm.removeFromLibrary(s); show = false } }
                         }
@@ -1841,7 +1857,7 @@ fun EditArtistDialog(vm: PlayerVM, nav: LibNav) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(name, { name = it }, singleLine = true, label = { Text("Name") })
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Art(vm.artistArt(old), Modifier.size(64.dp), 200, CircleShape, Icons.Rounded.Person)
+                    Art(vm.artistArt(old), Modifier.size(64.dp), 200, RoundedCornerShape(2.dp), Icons.Rounded.Person)
                     Column {
                         TextButton({ photo.launch("image/*") }) { Text("Change photo") }
                         if (vm.artistPhotos.containsKey(old.lowercase())) TextButton({ vm.removeArtistPhoto(old) }) { Text("Remove photo") }
@@ -1906,19 +1922,19 @@ fun SettingsScreen(vm: PlayerVM) {
     var confirm by remember { mutableStateOf(false) }
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { u -> if (u != null) vm.addFolder(u) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Settings", fontSize = 26.sp, fontWeight = FontWeight.Bold)
-        Text("Theme")
+        Text("SETTINGS", fontSize = 36.sp, fontWeight = FontWeight.Black, letterSpacing = (-1).sp)
+        Text("THEME", fontWeight = FontWeight.Black, letterSpacing = 1.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("System", "Dark", "Light").forEachIndexed { i, n ->
                 Pill(vm.theme == i, { vm.setThemeMode(i) }, { Text(n) })
             }
         }
-        Text("Sleep timer" + if (vm.timerOn) " (active)" else "")
+        Text("SLEEP TIMER" + (if (vm.timerOn) " (ACTIVE)" else ""), fontWeight = FontWeight.Black, letterSpacing = 1.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(15, 30, 60).forEach { m -> Pill(false, { vm.sleepTimer(m) }, { Text("$m min") }) }
             Pill(false, { vm.sleepTimer(0) }, { Text("Off") })
         }
-        Text("Music folders")
+        Text("MUSIC FOLDERS", fontWeight = FontWeight.Black, letterSpacing = 1.sp)
         if (vm.folders.isEmpty()) Text("No folders yet. Add one and the app will find your songs.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         vm.folders.toList().forEach { f ->
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1927,21 +1943,21 @@ fun SettingsScreen(vm: PlayerVM) {
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton({ folderPicker.launch(null) }) { Text("Add folder") }
-            OutlinedButton({ vm.scanFolders() }, enabled = vm.folders.isNotEmpty() && !vm.scanning) {
+            OBtn({ folderPicker.launch(null) }) { Text("Add folder") }
+            OBtn({ vm.scanFolders() }, enabled = vm.folders.isNotEmpty() && !vm.scanning) {
                 Text(if (vm.scanning) "Scanning..." else "Scan now")
             }
         }
-        Text("App updates")
+        Text("APP UPDATES", fontWeight = FontWeight.Black, letterSpacing = 1.sp)
         Text(
             vm.updateMsg.ifBlank { "Installed: build ${vm.installedBuild()}" },
             fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton({ vm.checkUpdate() }, enabled = !vm.updateBusy) { Text("Check for updates") }
-            if (vm.updateUrl != null) Button({ vm.installUpdate() }, enabled = !vm.updateBusy) { Text("Update") }
+            OBtn({ vm.checkUpdate() }, enabled = !vm.updateBusy) { Text("Check for updates") }
+            if (vm.updateUrl != null) Btn({ vm.installUpdate() }, enabled = !vm.updateBusy) { Text("Update") }
         }
-        Button({ confirm = true }) { Text("Clear library") }
+        Btn({ confirm = true }) { Text("Clear library") }
     }
     if (confirm) AlertDialog(
         onDismissRequest = { confirm = false },
@@ -1954,20 +1970,20 @@ fun SettingsScreen(vm: PlayerVM) {
 
 @Composable
 fun NowPlaying(vm: PlayerVM, onClose: () -> Unit, onLyrics: () -> Unit) {
-    val glow by animateColorAsState(rememberGlow(vm.artPath), tween(600), label = "glow")
+    val flat by animateColorAsState(rememberGlow(vm.artPath), tween(500), label = "flat")
     Surface(Modifier.fillMaxSize(), color = Color.Black, contentColor = Color.White) {
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(glow.copy(alpha = 0.6f), Color.Black)))) {
-            NowPlayingContent(vm, onClose, onLyrics)
-        }
+        NowPlayingContent(vm, onClose, onLyrics, flat)
     }
 }
 
 @Composable
-fun NowPlayingContent(vm: PlayerVM, onClose: () -> Unit, onLyrics: () -> Unit) {
+fun NowPlayingContent(vm: PlayerVM, onClose: () -> Unit, onLyrics: () -> Unit, flat: Color) {
     val c = vm.controller
     var pos by remember { mutableFloatStateOf(0f) }
     var dur by remember { mutableFloatStateOf(1f) }
     var dragging by remember { mutableStateOf(false) }
+    val dens = LocalDensity.current.density
+    val red = MaterialTheme.colorScheme.primary
     LaunchedEffect(c) {
         while (true) {
             if (c != null && !dragging) {
@@ -1977,18 +1993,24 @@ fun NowPlayingContent(vm: PlayerVM, onClose: () -> Unit, onLyrics: () -> Unit) {
             delay(300)
         }
     }
-    val soft = Color.White.copy(alpha = 0.65f)
+    val soft = Color(0xFFBDBDBD)
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         item { IconButton(onClose) { Icon(Icons.Rounded.KeyboardArrowDown, "Close") } }
         item {
-            Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp), contentAlignment = Alignment.Center) {
-                Art(vm.artPath, Modifier.fillMaxWidth().aspectRatio(1f), 800, RoundedCornerShape(20.dp))
+            Box(
+                Modifier.fillMaxWidth().padding(start = 4.dp, end = 12.dp, bottom = 12.dp)
+                    .drawBehind { drawRoundRect(red, Offset(8f * dens, 8f * dens), size, CornerRadius(4f * dens)) }
+                    .background(flat)
+                    .border(3.dp, Color.White, RoundedCornerShape(4.dp))
+                    .padding(14.dp)
+            ) {
+                Art(vm.artPath, Modifier.fillMaxWidth().aspectRatio(1f), 800, RoundedCornerShape(2.dp))
             }
         }
         item {
             Column(Modifier.padding(vertical = 16.dp)) {
-                Text(vm.title ?: "Nothing playing", fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                if (vm.artist.isNotBlank()) Text(vm.artist, fontSize = 16.sp, color = soft)
+                Text(vm.title ?: "Nothing playing", fontSize = 28.sp, fontWeight = FontWeight.Black, lineHeight = 32.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (vm.artist.isNotBlank()) Text(vm.artist, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = soft)
             }
         }
         item {
@@ -1999,53 +2021,53 @@ fun NowPlayingContent(vm: PlayerVM, onClose: () -> Unit, onLyrics: () -> Unit) {
                     valueRange = 0f..dur,
                     colors = SliderDefaults.colors(
                         thumbColor = Color.White,
-                        activeTrackColor = MaterialTheme.colorScheme.primary,
-                        inactiveTrackColor = Color.White.copy(alpha = 0.25f)
+                        activeTrackColor = red,
+                        inactiveTrackColor = Color(0xFF3A3A3A)
                     ),
                     onValueChangeFinished = { c?.seekTo(pos.toLong()); dragging = false }
                 )
                 Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(fmtTime(pos.toLong()), fontSize = 12.sp, color = soft)
-                    Text(fmtTime(if (dur > 1f) dur.toLong() else 0L), fontSize = 12.sp, color = soft)
+                    Text(fmtTime(pos.toLong()), fontSize = 14.sp, fontWeight = FontWeight.Black, color = soft)
+                    Text(fmtTime(if (dur > 1f) dur.toLong() else 0L), fontSize = 14.sp, fontWeight = FontWeight.Black, color = soft)
                 }
             }
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                 IconButton({ c?.shuffleModeEnabled = !vm.shuffle }) {
-                    Icon(Icons.Rounded.Shuffle, "Shuffle", tint = if (vm.shuffle) MaterialTheme.colorScheme.primary else Color.White)
+                    Icon(Icons.Rounded.Shuffle, "Shuffle", tint = if (vm.shuffle) red else Color.White)
                 }
                 IconButton({ c?.seekToPrevious() }) { Icon(Icons.Rounded.SkipPrevious, "Previous") }
                 FilledIconButton(
                     { vm.toggle() }, Modifier.size(64.dp),
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = Color.White
-                    )
+                    shape = RoundedCornerShape(4.dp),
+                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = red, contentColor = Color.White)
                 ) {
                     Icon(if (vm.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, "Play or pause", Modifier.size(38.dp))
                 }
                 IconButton({ c?.seekToNext() }) { Icon(Icons.Rounded.SkipNext, "Next") }
                 IconButton({ c?.repeatMode = if (vm.repeatAll) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ALL }) {
-                    Icon(Icons.Rounded.Repeat, "Repeat", tint = if (vm.repeatAll) MaterialTheme.colorScheme.primary else Color.White)
+                    Icon(Icons.Rounded.Repeat, "Repeat", tint = if (vm.repeatAll) red else Color.White)
                 }
             }
         }
         item {
-            OutlinedButton({ onLyrics() }, Modifier.fillMaxWidth().padding(top = 12.dp)) { Text("Lyrics") }
+            OBtn({ onLyrics() }, Modifier.fillMaxWidth().padding(top = 16.dp)) {
+                Text("LYRICS", fontWeight = FontWeight.Black, letterSpacing = 2.sp)
+            }
         }
-        item { Text("Queue", Modifier.padding(top = 16.dp, bottom = 4.dp), fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+        item { Text("QUEUE", Modifier.padding(top = 20.dp, bottom = 8.dp), fontSize = 20.sp, fontWeight = FontWeight.Black, letterSpacing = 1.sp) }
         itemsIndexed(vm.queue) { i, q ->
             Row(
-                Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                Modifier.fillMaxWidth().padding(start = 0.dp, end = 6.dp, top = 4.dp, bottom = 6.dp)
                     .card(playing = i == vm.index, onClick = { c?.seekToDefaultPosition(i); c?.play() })
                     .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Art(q.art, Modifier.size(40.dp))
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                    Text(q.title, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (i == vm.index) MaterialTheme.colorScheme.primary else Color.White)
-                    if (q.artist.isNotBlank()) Text(q.artist, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = soft)
+                    Text(q.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold, color = Color.White)
+                    if (q.artist.isNotBlank()) Text(q.artist, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (i == vm.index) Color(0xFFFFD9DB) else soft)
                 }
                 IconButton({ vm.removeFromQueue(i) }) { Icon(Icons.Rounded.Close, "Remove from queue") }
             }
@@ -2055,44 +2077,50 @@ fun NowPlayingContent(vm: PlayerVM, onClose: () -> Unit, onLyrics: () -> Unit) {
 
 @Composable
 fun LyricsScreen(vm: PlayerVM, onClose: () -> Unit) {
-    val glow by animateColorAsState(rememberGlow(vm.artPath), tween(600), label = "glow")
+    val flat by animateColorAsState(rememberGlow(vm.artPath), tween(500), label = "flat")
+    val onFlat = if (flat.luminance() > 0.5f) Color.Black else Color.White
     LaunchedEffect(vm.playingUri) { vm.loadLyrics() }
     val lines = vm.lyricLines
     val cur = lines.indexOfLast { it.t <= vm.posMs + 250 }
     val ls = rememberLazyListState()
     LaunchedEffect(cur) { if (cur >= 0 && lines.isNotEmpty()) ls.animateScrollToItem(maxOf(cur - 2, 0)) }
-    val soft = Color.White.copy(alpha = 0.65f)
+    val gray = Color(0xFF8C8C8C)
     Surface(Modifier.fillMaxSize(), color = Color.Black, contentColor = Color.White) {
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(glow.copy(alpha = 0.55f), Color.Black)))) {
-            Column(Modifier.fillMaxSize()) {
-                Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClose) { Icon(Icons.Rounded.KeyboardArrowDown, "Close") }
-                    Column(Modifier.weight(1f)) {
-                        Text(vm.title ?: "", fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        if (vm.artist.isNotBlank()) Text(vm.artist, fontSize = 13.sp, color = soft, maxLines = 1)
+        Column(Modifier.fillMaxSize()) {
+            Box(Modifier.fillMaxWidth().background(flat).border(2.dp, Color.White)) {
+                CompositionLocalProvider(LocalContentColor provides onFlat) {
+                    Row(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClose) { Icon(Icons.Rounded.KeyboardArrowDown, "Close") }
+                        Column(Modifier.weight(1f)) {
+                            Text(vm.title ?: "", fontWeight = FontWeight.Black, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (vm.artist.isNotBlank()) Text(vm.artist, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        }
                     }
                 }
-                when (vm.lyricsState) {
-                    1 -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = MaterialTheme.colorScheme.primary) }
-                    2 -> if (lines.isNotEmpty()) {
-                        LazyColumn(state = ls, contentPadding = PaddingValues(horizontal = 24.dp, vertical = 48.dp)) {
-                            itemsIndexed(lines) { i, l ->
-                                val col by animateColorAsState(if (i == cur) Color.White else Color.White.copy(alpha = 0.4f), tween(250), label = "line")
-                                Text(
-                                    l.text.ifBlank { "..." }, fontSize = 26.sp, fontWeight = FontWeight.Bold, lineHeight = 32.sp, color = col,
-                                    modifier = Modifier.fillMaxWidth().clickable { vm.controller?.seekTo(l.t) }.padding(vertical = 10.dp)
-                                )
-                            }
-                        }
-                    } else {
-                        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp)) {
-                            Text(vm.plainLyrics, fontSize = 20.sp, lineHeight = 30.sp)
+            }
+            when (vm.lyricsState) {
+                1 -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = MaterialTheme.colorScheme.primary) }
+                2 -> if (lines.isNotEmpty()) {
+                    LazyColumn(state = ls, contentPadding = PaddingValues(horizontal = 16.dp, vertical = 48.dp)) {
+                        itemsIndexed(lines) { i, l ->
+                            val on = i == cur
+                            val bgc by animateColorAsState(if (on) Red else Color.Black, tween(200), label = "lineBg")
+                            Text(
+                                l.text.ifBlank { "..." }, fontSize = 26.sp, fontWeight = FontWeight.Black, lineHeight = 32.sp,
+                                color = if (on) Color.White else gray,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).background(bgc)
+                                    .clickable { vm.controller?.seekTo(l.t) }.padding(horizontal = 12.dp, vertical = 10.dp)
+                            )
                         }
                     }
-                    else -> Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                        Text("No lyrics found for this song.", color = soft)
-                        OutlinedButton({ vm.loadLyrics(true) }, Modifier.padding(top = 12.dp)) { Text("Try again") }
+                } else {
+                    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp)) {
+                        Text(vm.plainLyrics, fontSize = 20.sp, fontWeight = FontWeight.Bold, lineHeight = 30.sp)
                     }
+                }
+                else -> Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                    Text("NO LYRICS FOUND", fontSize = 22.sp, fontWeight = FontWeight.Black, color = gray)
+                    OBtn({ vm.loadLyrics(true) }, Modifier.padding(top = 16.dp)) { Text("TRY AGAIN", fontWeight = FontWeight.Black, letterSpacing = 1.sp) }
                 }
             }
         }
@@ -2103,10 +2131,10 @@ fun LyricsScreen(vm: PlayerVM, onClose: () -> Unit) {
 fun Pill(selected: Boolean, onClick: () -> Unit, label: @Composable () -> Unit) =
     FilterChip(
         selected, onClick, label,
-        shape = RoundedCornerShape(50),
+        shape = RoundedCornerShape(4.dp),
         colors = FilterChipDefaults.filterChipColors(
             selectedContainerColor = MaterialTheme.colorScheme.primary,
-            selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+            selectedLabelColor = Color.White
         )
     )
 
@@ -2138,4 +2166,40 @@ fun CoverDialog(vm: PlayerVM) {
         confirmButton = { TextButton({ photo.launch("image/*") }) { Text("From my phone") } },
         dismissButton = { TextButton({ vm.coverFor = null }) { Text("Cancel") } }
     )
+}
+
+@Composable
+fun Btn(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true, content: @Composable RowScope.() -> Unit) =
+    Button(onClick, modifier, enabled, shape = RoundedCornerShape(4.dp), content = content)
+
+@Composable
+fun OBtn(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true, content: @Composable RowScope.() -> Unit) =
+    OutlinedButton(
+        onClick, modifier, enabled, shape = RoundedCornerShape(4.dp),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
+        border = BorderStroke(2.dp, MaterialTheme.colorScheme.onSurface), content = content
+    )
+
+@Composable
+fun Footer(text: String) =
+    Text(
+        text, Modifier.fillMaxWidth().padding(24.dp), fontSize = 12.sp, fontWeight = FontWeight.Black,
+        letterSpacing = 2.sp, color = Color(0xFF8C8C8C), textAlign = TextAlign.Center
+    )
+
+@Composable
+fun EmptyCard(title: String, sub: String, button: String, onClick: () -> Unit) {
+    val d = LocalDensity.current.density
+    val red = MaterialTheme.colorScheme.primary
+    Column(
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 24.dp, top = 16.dp, bottom = 24.dp)
+            .drawBehind { drawRoundRect(red, Offset(8f * d, 8f * d), size, CornerRadius(4f * d)) }
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(3.dp, MaterialTheme.colorScheme.onSurface, RoundedCornerShape(4.dp))
+            .padding(20.dp)
+    ) {
+        Text(title, fontSize = 28.sp, fontWeight = FontWeight.Black, lineHeight = 30.sp)
+        Text(sub, Modifier.padding(top = 6.dp, bottom = 16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Btn(onClick, Modifier.fillMaxWidth()) { Text(button, fontWeight = FontWeight.Black, letterSpacing = 1.sp) }
+    }
 }
