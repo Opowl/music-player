@@ -8,6 +8,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -23,7 +24,36 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -94,6 +124,55 @@ data class CoverOpt(val thumb: String, val full: String)
 data class Review(val uri: String, val name: String, val cands: List<Cand>)
 data class QItem(val title: String, val artist: String, val art: String?)
 class LookResult(val cands: List<Cand>, val art: String?)
+
+data class LyricLine(val t: Long, val text: String)
+
+val LocalIsPlaying = compositionLocalOf { false }
+val Red = Color(0xFFEE2533)
+
+fun JSONObject.str(k: String): String = if (isNull(k)) "" else optString(k, "")
+
+fun fmtTime(ms: Long): String {
+    val sec = (ms / 1000).toInt().coerceAtLeast(0)
+    return "%d:%02d".format(sec / 60, sec % 60)
+}
+
+fun avgColor(path: String?): Color? {
+    if (path == null) return null
+    return try {
+        val o = BitmapFactory.Options().apply { inSampleSize = 8 }
+        val bmp = BitmapFactory.decodeFile(path, o) ?: return null
+        val sm = Bitmap.createScaledBitmap(bmp, 12, 12, true)
+        var r = 0.0; var g = 0.0; var b = 0.0; var w = 0.0
+        val hsv = FloatArray(3)
+        for (x in 0 until 12) for (y in 0 until 12) {
+            val px = sm.getPixel(x, y)
+            android.graphics.Color.colorToHSV(px, hsv)
+            val wt = (hsv[1] * hsv[2]).toDouble() + 0.05
+            r += android.graphics.Color.red(px) * wt
+            g += android.graphics.Color.green(px) * wt
+            b += android.graphics.Color.blue(px) * wt
+            w += wt
+        }
+        val c = android.graphics.Color.rgb((r / w).toInt(), (g / w).toInt(), (b / w).toInt())
+        android.graphics.Color.colorToHSV(c, hsv)
+        hsv[1] = minOf(1f, hsv[1] * 1.25f)
+        hsv[2] = maxOf(hsv[2], 0.55f)
+        Color(android.graphics.Color.HSVToColor(hsv))
+    } catch (e: Exception) { null }
+}
+
+fun parseLrc(text: String): List<LyricLine> {
+    val out = ArrayList<LyricLine>()
+    val re = Regex("\\[(\\d+):(\\d+(?:\\.\\d+)?)]")
+    for (line in text.lines()) {
+        val ms = re.findAll(line).toList()
+        if (ms.isEmpty()) continue
+        val t = line.replace(re, "").trim()
+        for (m in ms) out.add(LyricLine(((m.groupValues[1].toLong() * 60 + m.groupValues[2].toDouble()) * 1000).toLong(), t))
+    }
+    return out.sortedBy { it.t }
+}
 
 class LibNav {
     var artist by mutableStateOf<String?>(null)
@@ -183,8 +262,15 @@ class PlayerVM(app: Application) : AndroidViewModel(app) {
     var updateMsg by mutableStateOf("")
     var updateUrl by mutableStateOf<String?>(null)
     var updateBusy by mutableStateOf(false)
+    var playingUri by mutableStateOf<String?>(null)
+    var posMs by mutableLongStateOf(0L)
+    var durMs by mutableLongStateOf(0L)
+    var lyricLines by mutableStateOf<List<LyricLine>>(emptyList())
+    var plainLyrics by mutableStateOf("")
+    var lyricsState by mutableIntStateOf(0)
+    private var lyricsUri: String? = null
 
-    init { load(); connect() }
+    init { load(); connect(); startTicker() }
 
     // ---------- storage ----------
     private fun load() {
@@ -475,6 +561,124 @@ class PlayerVM(app: Application) : AndroidViewModel(app) {
                 Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
             )
+        }
+    }
+
+    // ---------- progress, resume ----------
+    private fun startTicker() {
+        viewModelScope.launch {
+            var n = 0
+            while (true) {
+                val c = controller
+                if (c != null) {
+                    posMs = c.currentPosition
+                    durMs = maxOf(c.duration, 0L)
+                    n++
+                    if (c.isPlaying && n % 17 == 0) saveSession()
+                }
+                delay(300)
+            }
+        }
+    }
+
+    private fun saveSession() {
+        val c = controller ?: return
+        if (c.mediaItemCount == 0) return
+        try {
+            val q = JSONArray()
+            for (i in 0 until c.mediaItemCount) q.put(c.getMediaItemAt(i).mediaId)
+            File(ctx.filesDir, "session.json").writeText(
+                JSONObject().put("q", q).put("i", c.currentMediaItemIndex).put("p", c.currentPosition)
+                    .put("s", c.shuffleModeEnabled).put("r", c.repeatMode == Player.REPEAT_MODE_ALL).toString()
+            )
+        } catch (e: Exception) { }
+    }
+
+    private fun restoreSession(c: MediaController) {
+        try {
+            val f = File(ctx.filesDir, "session.json")
+            if (!f.exists()) return
+            val o = JSONObject(f.readText())
+            val q = o.getJSONArray("q")
+            val savedIdx = o.optInt("i")
+            val items = ArrayList<MediaItem>()
+            var start = 0
+            var found = false
+            for (k in 0 until q.length()) {
+                val sg = song(q.getString(k))
+                if (k == savedIdx) { start = items.size; found = sg != null }
+                if (sg != null) items.add(item(sg))
+            }
+            if (items.isEmpty()) return
+            start = start.coerceAtMost(items.size - 1)
+            c.shuffleModeEnabled = o.optBoolean("s")
+            c.repeatMode = if (o.optBoolean("r")) Player.REPEAT_MODE_ALL else Player.REPEAT_MODE_OFF
+            c.setMediaItems(items, start, if (found) o.optLong("p") else 0L)
+            c.prepare()
+        } catch (e: Exception) { }
+    }
+
+    // ---------- lyrics ----------
+    private fun fetchLyrics(s: Song, durSec: Int): Pair<String, String>? {
+        val q = if (s.artist.isNotBlank()) "track_name=" + URLEncoder.encode(s.title, "UTF-8") + "&artist_name=" + URLEncoder.encode(grp(s), "UTF-8")
+        else "q=" + URLEncoder.encode(s.title, "UTF-8")
+        val b = httpGet("https://lrclib.net/api/search?$q") ?: return null
+        try {
+            val arr = JSONArray(String(b))
+            var best: JSONObject? = null
+            var bestScore = Int.MAX_VALUE
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val syn = o.str("syncedLyrics")
+                val pl = o.str("plainLyrics")
+                if (syn.isBlank() && pl.isBlank()) continue
+                var sc = if (syn.isNotBlank()) 0 else 1000
+                val d = o.optDouble("duration", 0.0)
+                if (durSec > 0 && d > 0) sc += Math.abs(d - durSec).toInt()
+                if (sc < bestScore) { bestScore = sc; best = o }
+            }
+            val o = best ?: return Pair("", "")
+            return Pair(o.str("syncedLyrics"), o.str("plainLyrics"))
+        } catch (e: Exception) { return null }
+    }
+
+    fun loadLyrics(force: Boolean = false) {
+        val uri = playingUri ?: return
+        if (!force && uri == lyricsUri && lyricsState != 0) return
+        lyricsUri = uri
+        lyricLines = emptyList()
+        plainLyrics = ""
+        val s = song(uri)
+        if (s == null) { lyricsState = 3; return }
+        lyricsState = 1
+        val d = controller?.duration ?: 0L
+        val durSec = if (d > 0) (d / 1000).toInt() else 0
+        viewModelScope.launch {
+            val dir = File(ctx.filesDir, "lyrics").apply { mkdirs() }
+            val cf = File(dir, md5(uri) + ".json")
+            var syn = ""
+            var plain = ""
+            var ok = false
+            if (!force && cf.exists()) {
+                try {
+                    val o = JSONObject(cf.readText())
+                    syn = o.optString("s")
+                    plain = o.optString("p")
+                    ok = true
+                } catch (e: Exception) { }
+            }
+            if (!ok) {
+                val r = withContext(Dispatchers.IO) { try { fetchLyrics(s, durSec) } catch (e: Exception) { null } }
+                if (r != null) {
+                    syn = r.first
+                    plain = r.second
+                    withContext(Dispatchers.IO) { try { cf.writeText(JSONObject().put("s", syn).put("p", plain).toString()) } catch (e: Exception) { } }
+                }
+            }
+            if (lyricsUri != uri) return@launch
+            lyricLines = parseLrc(syn)
+            plainLyrics = plain
+            lyricsState = if (lyricLines.isNotEmpty() || plain.isNotBlank()) 2 else 3
         }
     }
 
@@ -878,7 +1082,7 @@ class PlayerVM(app: Application) : AndroidViewModel(app) {
     fun setThemeMode(i: Int) { theme = i; prefs.edit().putInt("theme", i).apply() }
 
     private val listener = object : Player.Listener {
-        override fun onEvents(player: Player, events: Player.Events) { sync(player) }
+        override fun onEvents(player: Player, events: Player.Events) { sync(player); saveSession() }
     }
 
     private fun sync(p: Player) {
@@ -890,6 +1094,7 @@ class PlayerVM(app: Application) : AndroidViewModel(app) {
         index = p.currentMediaItemIndex
         shuffle = p.shuffleModeEnabled
         repeatAll = p.repeatMode == Player.REPEAT_MODE_ALL
+        playingUri = p.currentMediaItem?.mediaId
         queue.clear()
         for (i in 0 until p.mediaItemCount) {
             val m = p.getMediaItemAt(i).mediaMetadata
@@ -905,6 +1110,7 @@ class PlayerVM(app: Application) : AndroidViewModel(app) {
                 val c = f.get()
                 controller = c
                 c.addListener(listener)
+                if (c.mediaItemCount == 0) restoreSession(c)
                 sync(c)
             } catch (e: Exception) { }
         }, ContextCompat.getMainExecutor(ctx))
@@ -929,16 +1135,92 @@ class MainActivity : ComponentActivity() {
 fun AppTheme(mode: Int, content: @Composable () -> Unit) {
     val dark = when (mode) { 1 -> true; 2 -> false; else -> isSystemInDarkTheme() }
     val scheme = if (dark) darkColorScheme(
-        primary = Color(0xFF1DB954), onPrimary = Color.Black,
-        background = Color(0xFF121212), surface = Color(0xFF121212),
-        surfaceVariant = Color(0xFF282828), onSurface = Color.White, onBackground = Color.White,
-        onSurfaceVariant = Color(0xFFB3B3B3)
-    ) else lightColorScheme(primary = Color(0xFF1DB954), onPrimary = Color.Black)
+        primary = Red, onPrimary = Color.White,
+        background = Color.Black, surface = Color.Black, surfaceVariant = Color(0xFF111111),
+        onSurface = Color.White, onBackground = Color.White, onSurfaceVariant = Color(0xFFB0B0B0),
+        surfaceTint = Color.Transparent, outline = Color(0xFF3A3A3A),
+        surfaceContainerLowest = Color.Black, surfaceContainerLow = Color(0xFF0A0A0A),
+        surfaceContainer = Color(0xFF101010), surfaceContainerHigh = Color(0xFF161616),
+        surfaceContainerHighest = Color(0xFF1C1C1C)
+    ) else lightColorScheme(
+        primary = Red, onPrimary = Color.White,
+        background = Color(0xFFFAF6F6), surface = Color(0xFFFAF6F6), surfaceVariant = Color(0xFFF0E8E8),
+        surfaceTint = Color.Transparent
+    )
     val shapes = Shapes(
         extraSmall = RoundedCornerShape(12.dp), small = RoundedCornerShape(14.dp),
         medium = RoundedCornerShape(18.dp), large = RoundedCornerShape(24.dp), extraLarge = RoundedCornerShape(28.dp)
     )
     MaterialTheme(colorScheme = scheme, shapes = shapes, content = content)
+}
+
+@Composable
+fun Modifier.enter(index: Int): Modifier {
+    val a = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        delay(if (index < 12) index * 35L else 0L)
+        a.animateTo(1f, tween(320))
+    }
+    return this.graphicsLayer { alpha = a.value; translationY = (1f - a.value) * 40f }
+}
+
+@Composable
+fun Modifier.card(
+    selected: Boolean = false, playing: Boolean = false,
+    onClick: () -> Unit, onLong: (() -> Unit)? = null
+): Modifier {
+    val src = remember { MutableInteractionSource() }
+    val pressed by src.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        if (pressed) 0.97f else 1f,
+        spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+        label = "press"
+    )
+    val haptic = LocalHapticFeedback.current
+    val c = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(16.dp)
+    val borderColor = when {
+        selected || playing -> c.primary
+        pressed -> c.onSurface.copy(alpha = 0.3f)
+        else -> c.onSurface.copy(alpha = 0.12f)
+    }
+    val bg = when {
+        selected -> c.primary.copy(alpha = 0.18f)
+        playing -> c.primary.copy(alpha = 0.07f)
+        else -> c.surfaceVariant
+    }
+    val lc: (() -> Unit)? = if (onLong == null) null else ({ haptic.performHapticFeedback(HapticFeedbackType.LongPress); onLong() })
+    return this
+        .graphicsLayer { scaleX = scale; scaleY = scale }
+        .clip(shape)
+        .background(bg)
+        .border(1.dp, borderColor, shape)
+        .combinedClickable(
+            interactionSource = src, indication = LocalIndication.current,
+            onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); onClick() },
+            onLongClick = lc
+        )
+}
+
+@Composable
+fun EqBars(color: Color) {
+    val live = LocalIsPlaying.current
+    val t = rememberInfiniteTransition(label = "eq")
+    val a by t.animateFloat(0.25f, 1f, infiniteRepeatable(tween(420, easing = LinearEasing), RepeatMode.Reverse), label = "a")
+    val b by t.animateFloat(0.25f, 1f, infiniteRepeatable(tween(560, easing = LinearEasing), RepeatMode.Reverse), label = "b")
+    val c by t.animateFloat(0.25f, 1f, infiniteRepeatable(tween(350, easing = LinearEasing), RepeatMode.Reverse), label = "c")
+    Row(Modifier.height(16.dp).width(18.dp), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.Bottom) {
+        listOf(a, b, c).forEach { h ->
+            Box(Modifier.width(4.dp).fillMaxHeight(if (live) h else 0.3f).background(color, RoundedCornerShape(1.dp)))
+        }
+    }
+}
+
+@Composable
+fun rememberGlow(path: String?): Color {
+    val fallback = MaterialTheme.colorScheme.primary
+    val c by produceState(fallback, path) { value = withContext(Dispatchers.IO) { avgColor(path) } ?: fallback }
+    return c
 }
 
 @Composable
@@ -964,53 +1246,62 @@ fun Root(vm: PlayerVM) {
     var tab by remember { mutableIntStateOf(0) }
     var open by remember { mutableStateOf<String?>(null) }
     var full by remember { mutableStateOf(false) }
+    var lyrics by remember { mutableStateOf(false) }
     val nav = remember { LibNav() }
-    CoverDialog(vm)
-    EditSongDialog(vm)
-    EditArtistDialog(vm, nav)
-    EditAlbumDialog(vm, nav)
-    AddToPlaylistDialog(vm)
-    SelectionDialogs(vm)
-    if (full) {
-        BackHandler { full = false }
-        NowPlaying(vm) { full = false }
-    } else {
-        if (open != null) BackHandler { open = null }
-        if (tab == 1 && nav.artist != null) BackHandler { if (nav.album != null) nav.album = null else nav.artist = null }
-        if (vm.selected.isNotEmpty()) BackHandler { vm.clearSel() }
-        Scaffold(bottomBar = {
-            Column {
-                if (vm.title != null) MiniPlayer(vm) { full = true }
-                NavigationBar(containerColor = MaterialTheme.colorScheme.background, tonalElevation = 0.dp) {
-                    listOf(
-                        "Playlists" to Icons.Rounded.LibraryMusic,
-                        "Library" to Icons.Rounded.MusicNote,
-                        "Settings" to Icons.Rounded.Settings
-                    ).forEachIndexed { i, (label, icon) ->
-                        NavigationBarItem(
-                            selected = tab == i,
-                            onClick = { vm.clearSel(); if (i == 1 && tab == 1) { nav.artist = null; nav.album = null }; tab = i; open = null },
-                            icon = { Icon(icon, label) },
-                            label = { Text(label) },
-                            colors = NavigationBarItemDefaults.colors(
-                                indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
-                                selectedIconColor = MaterialTheme.colorScheme.primary,
-                                selectedTextColor = MaterialTheme.colorScheme.primary
+    CompositionLocalProvider(LocalIsPlaying provides vm.isPlaying) {
+        CoverDialog(vm)
+        EditSongDialog(vm)
+        EditArtistDialog(vm, nav)
+        EditAlbumDialog(vm, nav)
+        AddToPlaylistDialog(vm)
+        SelectionDialogs(vm)
+        Box(Modifier.fillMaxSize()) {
+            if (open != null) BackHandler { open = null }
+            if (tab == 1 && nav.artist != null) BackHandler { if (nav.album != null) nav.album = null else nav.artist = null }
+            if (vm.selected.isNotEmpty()) BackHandler { vm.clearSel() }
+            Scaffold(bottomBar = {
+                Column {
+                    if (vm.title != null) MiniPlayer(vm) { full = true }
+                    NavigationBar(containerColor = MaterialTheme.colorScheme.background, tonalElevation = 0.dp) {
+                        listOf(
+                            "Playlists" to Icons.Rounded.LibraryMusic,
+                            "Library" to Icons.Rounded.MusicNote,
+                            "Settings" to Icons.Rounded.Settings
+                        ).forEachIndexed { i, (label, icon) ->
+                            NavigationBarItem(
+                                selected = tab == i,
+                                onClick = { vm.clearSel(); if (i == 1 && tab == 1) { nav.artist = null; nav.album = null }; tab = i; open = null },
+                                icon = { Icon(icon, label) },
+                                label = { Text(label) },
+                                colors = NavigationBarItemDefaults.colors(
+                                    indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
+                                    selectedIconColor = MaterialTheme.colorScheme.primary,
+                                    selectedTextColor = MaterialTheme.colorScheme.primary
+                                )
                             )
-                        )
+                        }
                     }
                 }
-            }
-        }) { pad ->
-            Box(Modifier.padding(pad)) {
-                val o = open
-                when {
-                    tab == 1 -> LibraryScreen(vm, nav)
-                    tab == 2 -> SettingsScreen(vm)
-                    o != null -> PlaylistDetail(vm, o) { open = null }
-                    else -> PlaylistsScreen(vm) { open = it }
+            }) { pad ->
+                Box(Modifier.padding(pad)) {
+                    val o = open
+                    when {
+                        tab == 1 -> LibraryScreen(vm, nav)
+                        tab == 2 -> SettingsScreen(vm)
+                        o != null -> PlaylistDetail(vm, o) { open = null }
+                        else -> PlaylistsScreen(vm) { open = it }
+                    }
+                    if (vm.selected.isNotEmpty()) SelectionBar(vm, Modifier.align(Alignment.TopCenter))
                 }
-                if (vm.selected.isNotEmpty()) SelectionBar(vm, Modifier.align(Alignment.TopCenter))
+            }
+            if (full) BackHandler { if (lyrics) lyrics = false else full = false }
+            AnimatedVisibility(
+                visible = full,
+                enter = slideInVertically(tween(320)) { it } + fadeIn(tween(320)),
+                exit = slideOutVertically(tween(260)) { it } + fadeOut(tween(260))
+            ) {
+                if (lyrics) LyricsScreen(vm) { lyrics = false }
+                else NowPlaying(vm, { full = false; lyrics = false }, { lyrics = true })
             }
         }
     }
@@ -1021,19 +1312,26 @@ fun MiniPlayer(vm: PlayerVM, onOpen: () -> Unit) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)),
         modifier = Modifier.fillMaxWidth().clickable { onOpen() }
     ) {
-        Row(Modifier.padding(start = 8.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Art(vm.artPath, Modifier.size(44.dp))
-            Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Text(vm.title ?: "", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (vm.artist.isNotBlank()) Text(vm.artist, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column {
+            Row(Modifier.padding(start = 8.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Art(vm.artPath, Modifier.size(44.dp))
+                Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                    Text(vm.title ?: "", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (vm.artist.isNotBlank()) Text(vm.artist, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                IconButton({ vm.controller?.seekToPrevious() }) { Icon(Icons.Rounded.SkipPrevious, "Previous") }
+                IconButton({ vm.toggle() }) {
+                    Icon(if (vm.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, "Play or pause")
+                }
+                IconButton({ vm.controller?.seekToNext() }) { Icon(Icons.Rounded.SkipNext, "Next") }
             }
-            IconButton({ vm.controller?.seekToPrevious() }) { Icon(Icons.Rounded.SkipPrevious, "Previous") }
-            IconButton({ vm.toggle() }) {
-                Icon(if (vm.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, "Play or pause")
+            val frac = if (vm.durMs > 0) (vm.posMs.toFloat() / vm.durMs).coerceIn(0f, 1f) else 0f
+            Box(Modifier.fillMaxWidth().height(2.dp).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))) {
+                Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(MaterialTheme.colorScheme.primary))
             }
-            IconButton({ vm.controller?.seekToNext() }) { Icon(Icons.Rounded.SkipNext, "Next") }
         }
     }
 }
@@ -1044,21 +1342,21 @@ fun MenuItem(text: String, onClick: () -> Unit) = DropdownMenuItem(text = { Text
 @Composable
 fun SongRow(
     s: Song, onClick: () -> Unit, selected: Boolean = false, onLong: (() -> Unit)? = null,
-    menu: @Composable (() -> Unit) -> Unit
+    playing: Boolean = false, index: Int = 0, menu: @Composable (() -> Unit) -> Unit
 ) {
     var show by remember { mutableStateOf(false) }
     Row(
-        Modifier.fillMaxWidth()
-            .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.Transparent)
-            .combinedClickable(onClick = onClick, onLongClick = onLong)
-            .padding(start = 16.dp, top = 4.dp, bottom = 4.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).enter(index)
+            .card(selected, playing, onClick, onLong)
+            .padding(start = 8.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Art(s.art, Modifier.size(48.dp))
         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-            Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (playing) MaterialTheme.colorScheme.primary else Color.Unspecified)
             if (s.artist.isNotBlank()) Text(s.artist, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+        if (playing) EqBars(MaterialTheme.colorScheme.primary)
         Box {
             IconButton({ show = true }) { Icon(Icons.Rounded.MoreVert, "More") }
             DropdownMenu(show, { show = false }) { menu { show = false } }
@@ -1088,8 +1386,11 @@ fun PlaylistsScreen(vm: PlayerVM, onOpen: (String) -> Unit) {
         }
         if (vm.playlists.isEmpty()) Text("No playlists yet. Tap New playlist to make one.", Modifier.padding(16.dp))
         LazyColumn {
-            items(vm.playlists, key = { it.id }) { p ->
-                Column(Modifier.fillMaxWidth().clickable { onOpen(p.id) }.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            itemsIndexed(vm.playlists, key = { _, p -> p.id }) { i, p ->
+                Column(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).enter(i)
+                        .card(onClick = { onOpen(p.id) }).padding(horizontal = 16.dp, vertical = 14.dp)
+                ) {
                     Text(p.name, fontSize = 18.sp)
                     Text("${p.uris.size} songs", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -1120,7 +1421,7 @@ fun PlaylistDetail(vm: PlayerVM, id: String, onBack: () -> Unit) {
         }
         LazyColumn {
             itemsIndexed(songs) { i, s ->
-                SongRow(s, { if (vm.selected.isNotEmpty()) vm.toggleSel(s.uri) else vm.play(songs, i) }, s.uri in vm.selected, { vm.toggleSel(s.uri) }) { dismiss ->
+                SongRow(s, { if (vm.selected.isNotEmpty()) vm.toggleSel(s.uri) else vm.play(songs, i) }, s.uri in vm.selected, { vm.toggleSel(s.uri) }, s.uri == vm.playingUri, i) { dismiss ->
                     SongMenu(vm, s, dismiss) { MenuItem("Remove from playlist") { vm.toggleInPlaylist(id, s.uri); dismiss() } }
                 }
             }
@@ -1167,19 +1468,33 @@ fun SongMenu(vm: PlayerVM, s: Song, dismiss: () -> Unit, extra: @Composable () -
 
 @Composable
 fun LibraryScreen(vm: PlayerVM, nav: LibNav) {
-    val a = nav.artist
-    val b = nav.album
-    when {
-        a == null -> ArtistsScreen(vm, nav)
-        b == null -> ArtistPage(vm, nav, a)
-        else -> AlbumPage(vm, nav, a, b)
+    AnimatedContent(
+        targetState = Pair(nav.artist, nav.album),
+        transitionSpec = {
+            val from = (if (initialState.first == null) 0 else if (initialState.second == null) 1 else 2)
+            val to = (if (targetState.first == null) 0 else if (targetState.second == null) 1 else 2)
+            if (to >= from) (slideInHorizontally(tween(300)) { it / 3 } + fadeIn(tween(300))) togetherWith
+                (slideOutHorizontally(tween(300)) { -it / 3 } + fadeOut(tween(200)))
+            else (slideInHorizontally(tween(300)) { -it / 3 } + fadeIn(tween(300))) togetherWith
+                (slideOutHorizontally(tween(300)) { it / 3 } + fadeOut(tween(200)))
+        },
+        label = "library"
+    ) { st ->
+        val a = st.first
+        val b = st.second
+        when {
+            a == null -> ArtistsScreen(vm, nav)
+            b == null -> ArtistPage(vm, nav, a)
+            else -> AlbumPage(vm, nav, a, b)
+        }
     }
 }
 
 @Composable
-fun ArtistRow(vm: PlayerVM, name: String, count: Int, onClick: () -> Unit) {
+fun ArtistRow(vm: PlayerVM, name: String, count: Int, index: Int, onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 8.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).enter(index)
+            .card(onClick = onClick).padding(10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Art(vm.artistArt(name), Modifier.size(56.dp), 160, CircleShape, Icons.Rounded.Person)
@@ -1225,7 +1540,7 @@ fun ArtistsScreen(vm: PlayerVM, nav: LibNav) {
         if (vm.library.isEmpty()) Text("Tap + to add songs from your phone.", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
         LazyColumn {
             if (ql.isEmpty()) {
-                items(artists, key = { it.first.lowercase() }) { (n, ss) -> ArtistRow(vm, n, ss.size) { nav.artist = n; nav.album = null } }
+                itemsIndexed(artists, key = { _, a -> a.first.lowercase() }) { i, (n, ss) -> ArtistRow(vm, n, ss.size, i) { nav.artist = n; nav.album = null } }
             } else {
                 val hitArtists = artists.filter { it.first.lowercase().contains(ql) }
                 val hitAlbums = artists.flatMap { (an, ss) ->
@@ -1233,11 +1548,11 @@ fun ArtistsScreen(vm: PlayerVM, nav: LibNav) {
                 }
                 val hitSongs = vm.library.filter { it.title.lowercase().contains(ql) }
                 if (hitArtists.isNotEmpty()) item { SectionLabel("Artists") }
-                items(hitArtists) { (n, ss) -> ArtistRow(vm, n, ss.size) { nav.artist = n; nav.album = null } }
+                items(hitArtists) { (n, ss) -> ArtistRow(vm, n, ss.size, 0) { nav.artist = n; nav.album = null } }
                 if (hitAlbums.isNotEmpty()) item { SectionLabel("Albums") }
                 items(hitAlbums) { t ->
                     Row(
-                        Modifier.fillMaxWidth().clickable { nav.artist = t.first; nav.album = t.second }.padding(horizontal = 16.dp, vertical = 6.dp),
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).card(onClick = { nav.artist = t.first; nav.album = t.second }).padding(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Art(t.third.firstOrNull { it.art != null }?.art, Modifier.size(48.dp))
@@ -1249,7 +1564,7 @@ fun ArtistsScreen(vm: PlayerVM, nav: LibNav) {
                 }
                 if (hitSongs.isNotEmpty()) item { SectionLabel("Songs") }
                 itemsIndexed(hitSongs) { i, s ->
-                    SongRow(s, { if (vm.selected.isNotEmpty()) vm.toggleSel(s.uri) else vm.play(hitSongs, i) }, s.uri in vm.selected, { vm.toggleSel(s.uri) }) { d ->
+                    SongRow(s, { if (vm.selected.isNotEmpty()) vm.toggleSel(s.uri) else vm.play(hitSongs, i) }, s.uri in vm.selected, { vm.toggleSel(s.uri) }, s.uri == vm.playingUri, i) { d ->
                         SongMenu(vm, s, d) { MenuItem("Remove from library") { vm.removeFromLibrary(s); d() } }
                     }
                 }
@@ -1312,9 +1627,10 @@ fun ArtistPage(vm: PlayerVM, nav: LibNav, artist: String) {
                     OutlinedButton({ vm.play(all, all.indices.random(), true) }) { Text("Shuffle") }
                 }
             }
-            items(albums, key = { it.first.lowercase() }) { (name, ss) ->
+            itemsIndexed(albums, key = { _, a -> a.first.lowercase() }) { idx, (name, ss) ->
                 Row(
-                    Modifier.fillMaxWidth().clickable { nav.album = name }.padding(horizontal = 16.dp, vertical = 6.dp),
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).enter(idx)
+                        .card(onClick = { nav.album = name }).padding(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Art(ss.firstOrNull { it.art != null }?.art, Modifier.size(56.dp), 160)
@@ -1359,13 +1675,13 @@ fun AlbumPage(vm: PlayerVM, nav: LibNav, artist: String, album: String) {
             itemsIndexed(songs) { i, s ->
                 var show by remember { mutableStateOf(false) }
                 Row(
-                    Modifier.fillMaxWidth()
-                        .background(if (s.uri in vm.selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.Transparent)
-                        .combinedClickable(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp).enter(i)
+                        .card(
+                            selected = s.uri in vm.selected, playing = s.uri == vm.playingUri,
                             onClick = { if (vm.selected.isNotEmpty()) vm.toggleSel(s.uri) else vm.play(songs, i) },
-                            onLongClick = { vm.toggleSel(s.uri) }
+                            onLong = { vm.toggleSel(s.uri) }
                         )
-                        .padding(start = 16.dp, top = 6.dp, bottom = 6.dp),
+                        .padding(start = 12.dp, top = 8.dp, bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(if (s.track > 0) "${s.track}" else "${i + 1}", Modifier.width(32.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1374,6 +1690,7 @@ fun AlbumPage(vm: PlayerVM, nav: LibNav, artist: String, album: String) {
                         if (s.artist.isNotBlank() && !s.artist.equals(artist, true))
                             Text(s.artist, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    if (s.uri == vm.playingUri) EqBars(MaterialTheme.colorScheme.primary)
                     Box {
                         IconButton({ show = true }) { Icon(Icons.Rounded.MoreVert, "More") }
                         DropdownMenu(show, { show = false }) {
@@ -1636,17 +1953,17 @@ fun SettingsScreen(vm: PlayerVM) {
 }
 
 @Composable
-fun NowPlaying(vm: PlayerVM, onClose: () -> Unit) {
-    val top = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(top, MaterialTheme.colorScheme.background)))) {
-            NowPlayingContent(vm, onClose)
+fun NowPlaying(vm: PlayerVM, onClose: () -> Unit, onLyrics: () -> Unit) {
+    val glow by animateColorAsState(rememberGlow(vm.artPath), tween(600), label = "glow")
+    Surface(Modifier.fillMaxSize(), color = Color.Black, contentColor = Color.White) {
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(glow.copy(alpha = 0.6f), Color.Black)))) {
+            NowPlayingContent(vm, onClose, onLyrics)
         }
     }
 }
 
 @Composable
-fun NowPlayingContent(vm: PlayerVM, onClose: () -> Unit) {
+fun NowPlayingContent(vm: PlayerVM, onClose: () -> Unit, onLyrics: () -> Unit) {
     val c = vm.controller
     var pos by remember { mutableFloatStateOf(0f) }
     var dur by remember { mutableFloatStateOf(1f) }
@@ -1657,71 +1974,126 @@ fun NowPlayingContent(vm: PlayerVM, onClose: () -> Unit) {
                 pos = c.currentPosition.toFloat()
                 dur = maxOf(c.duration.toFloat(), 1f)
             }
-            delay(500)
+            delay(300)
         }
     }
+    val soft = Color.White.copy(alpha = 0.65f)
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         item { IconButton(onClose) { Icon(Icons.Rounded.KeyboardArrowDown, "Close") } }
         item {
             Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp), contentAlignment = Alignment.Center) {
-                Art(vm.artPath, Modifier.fillMaxWidth().aspectRatio(1f), 800)
+                Art(vm.artPath, Modifier.fillMaxWidth().aspectRatio(1f), 800, RoundedCornerShape(20.dp))
             }
         }
         item {
             Column(Modifier.padding(vertical = 16.dp)) {
                 Text(vm.title ?: "Nothing playing", fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                if (vm.artist.isNotBlank()) Text(vm.artist, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (vm.artist.isNotBlank()) Text(vm.artist, fontSize = 16.sp, color = soft)
             }
         }
         item {
-            Slider(
-                value = pos.coerceIn(0f, dur),
-                onValueChange = { dragging = true; pos = it },
-                valueRange = 0f..dur,
-                colors = SliderDefaults.colors(
-                    thumbColor = MaterialTheme.colorScheme.onBackground,
-                    activeTrackColor = MaterialTheme.colorScheme.onBackground,
-                    inactiveTrackColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.25f)
-                ),
-                onValueChangeFinished = { c?.seekTo(pos.toLong()); dragging = false }
-            )
+            Column {
+                Slider(
+                    value = pos.coerceIn(0f, dur),
+                    onValueChange = { dragging = true; pos = it },
+                    valueRange = 0f..dur,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color.White,
+                        activeTrackColor = MaterialTheme.colorScheme.primary,
+                        inactiveTrackColor = Color.White.copy(alpha = 0.25f)
+                    ),
+                    onValueChangeFinished = { c?.seekTo(pos.toLong()); dragging = false }
+                )
+                Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(fmtTime(pos.toLong()), fontSize = 12.sp, color = soft)
+                    Text(fmtTime(if (dur > 1f) dur.toLong() else 0L), fontSize = 12.sp, color = soft)
+                }
+            }
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                 IconButton({ c?.shuffleModeEnabled = !vm.shuffle }) {
-                    Icon(Icons.Rounded.Shuffle, "Shuffle", tint = if (vm.shuffle) MaterialTheme.colorScheme.primary else LocalContentColor.current)
+                    Icon(Icons.Rounded.Shuffle, "Shuffle", tint = if (vm.shuffle) MaterialTheme.colorScheme.primary else Color.White)
                 }
                 IconButton({ c?.seekToPrevious() }) { Icon(Icons.Rounded.SkipPrevious, "Previous") }
                 FilledIconButton(
                     { vm.toggle() }, Modifier.size(64.dp),
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary
+                        contentColor = Color.White
                     )
                 ) {
                     Icon(if (vm.isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, "Play or pause", Modifier.size(38.dp))
                 }
                 IconButton({ c?.seekToNext() }) { Icon(Icons.Rounded.SkipNext, "Next") }
                 IconButton({ c?.repeatMode = if (vm.repeatAll) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ALL }) {
-                    Icon(Icons.Rounded.Repeat, "Repeat", tint = if (vm.repeatAll) MaterialTheme.colorScheme.primary else LocalContentColor.current)
+                    Icon(Icons.Rounded.Repeat, "Repeat", tint = if (vm.repeatAll) MaterialTheme.colorScheme.primary else Color.White)
                 }
             }
+        }
+        item {
+            OutlinedButton({ onLyrics() }, Modifier.fillMaxWidth().padding(top = 12.dp)) { Text("Lyrics") }
         }
         item { Text("Queue", Modifier.padding(top = 16.dp, bottom = 4.dp), fontSize = 18.sp, fontWeight = FontWeight.Bold) }
         itemsIndexed(vm.queue) { i, q ->
             Row(
-                Modifier.fillMaxWidth().clickable { c?.seekToDefaultPosition(i); c?.play() }.padding(vertical = 4.dp),
+                Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    .card(playing = i == vm.index, onClick = { c?.seekToDefaultPosition(i); c?.play() })
+                    .padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Art(q.art, Modifier.size(40.dp))
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                    Text(
-                        q.title, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        color = if (i == vm.index) MaterialTheme.colorScheme.primary else LocalContentColor.current
-                    )
-                    if (q.artist.isNotBlank()) Text(q.artist, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(q.title, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (i == vm.index) MaterialTheme.colorScheme.primary else Color.White)
+                    if (q.artist.isNotBlank()) Text(q.artist, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, color = soft)
                 }
                 IconButton({ vm.removeFromQueue(i) }) { Icon(Icons.Rounded.Close, "Remove from queue") }
+            }
+        }
+    }
+}
+
+@Composable
+fun LyricsScreen(vm: PlayerVM, onClose: () -> Unit) {
+    val glow by animateColorAsState(rememberGlow(vm.artPath), tween(600), label = "glow")
+    LaunchedEffect(vm.playingUri) { vm.loadLyrics() }
+    val lines = vm.lyricLines
+    val cur = lines.indexOfLast { it.t <= vm.posMs + 250 }
+    val ls = rememberLazyListState()
+    LaunchedEffect(cur) { if (cur >= 0 && lines.isNotEmpty()) ls.animateScrollToItem(maxOf(cur - 2, 0)) }
+    val soft = Color.White.copy(alpha = 0.65f)
+    Surface(Modifier.fillMaxSize(), color = Color.Black, contentColor = Color.White) {
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(glow.copy(alpha = 0.55f), Color.Black)))) {
+            Column(Modifier.fillMaxSize()) {
+                Row(Modifier.padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClose) { Icon(Icons.Rounded.KeyboardArrowDown, "Close") }
+                    Column(Modifier.weight(1f)) {
+                        Text(vm.title ?: "", fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (vm.artist.isNotBlank()) Text(vm.artist, fontSize = 13.sp, color = soft, maxLines = 1)
+                    }
+                }
+                when (vm.lyricsState) {
+                    1 -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator(color = MaterialTheme.colorScheme.primary) }
+                    2 -> if (lines.isNotEmpty()) {
+                        LazyColumn(state = ls, contentPadding = PaddingValues(horizontal = 24.dp, vertical = 48.dp)) {
+                            itemsIndexed(lines) { i, l ->
+                                val col by animateColorAsState(if (i == cur) Color.White else Color.White.copy(alpha = 0.4f), tween(250), label = "line")
+                                Text(
+                                    l.text.ifBlank { "..." }, fontSize = 26.sp, fontWeight = FontWeight.Bold, lineHeight = 32.sp, color = col,
+                                    modifier = Modifier.fillMaxWidth().clickable { vm.controller?.seekTo(l.t) }.padding(vertical = 10.dp)
+                                )
+                            }
+                        }
+                    } else {
+                        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp)) {
+                            Text(vm.plainLyrics, fontSize = 20.sp, lineHeight = 30.sp)
+                        }
+                    }
+                    else -> Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                        Text("No lyrics found for this song.", color = soft)
+                        OutlinedButton({ vm.loadLyrics(true) }, Modifier.padding(top = 12.dp)) { Text("Try again") }
+                    }
+                }
             }
         }
     }
