@@ -89,6 +89,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -133,7 +135,30 @@ class LookResult(val cands: List<Cand>, val art: String?)
 data class LyricLine(val t: Long, val text: String)
 
 val LocalIsPlaying = compositionLocalOf { false }
-val Red = Color(0xFFEE2533)
+val Red = Color(0xFFBF1B27)
+
+val HeaderFont = FontFamily(
+    Font(R.font.liberation_sans_narrow_bold, FontWeight.Normal),
+    Font(R.font.liberation_sans_narrow_bold, FontWeight.Bold),
+    Font(R.font.liberation_sans_narrow_bold, FontWeight.Black)
+)
+val BodyFont = FontFamily(
+    Font(R.font.liberation_serif_bold, FontWeight.Normal),
+    Font(R.font.liberation_serif_bold, FontWeight.Medium),
+    Font(R.font.liberation_serif_bold, FontWeight.Bold),
+    Font(R.font.liberation_serif_bold, FontWeight.Black)
+)
+
+fun Typography.withFont(f: FontFamily) = Typography(
+    displayLarge = displayLarge.copy(fontFamily = f), displayMedium = displayMedium.copy(fontFamily = f),
+    displaySmall = displaySmall.copy(fontFamily = f), headlineLarge = headlineLarge.copy(fontFamily = f),
+    headlineMedium = headlineMedium.copy(fontFamily = f), headlineSmall = headlineSmall.copy(fontFamily = f),
+    titleLarge = titleLarge.copy(fontFamily = f), titleMedium = titleMedium.copy(fontFamily = f),
+    titleSmall = titleSmall.copy(fontFamily = f), bodyLarge = bodyLarge.copy(fontFamily = f),
+    bodyMedium = bodyMedium.copy(fontFamily = f), bodySmall = bodySmall.copy(fontFamily = f),
+    labelLarge = labelLarge.copy(fontFamily = f), labelMedium = labelMedium.copy(fontFamily = f),
+    labelSmall = labelSmall.copy(fontFamily = f)
+)
 
 fun JSONObject.str(k: String): String = if (isNull(k)) "" else optString(k, "")
 
@@ -1156,7 +1181,7 @@ fun AppTheme(mode: Int, content: @Composable () -> Unit) {
         extraSmall = RoundedCornerShape(2.dp), small = RoundedCornerShape(4.dp),
         medium = RoundedCornerShape(4.dp), large = RoundedCornerShape(6.dp), extraLarge = RoundedCornerShape(6.dp)
     )
-    MaterialTheme(colorScheme = scheme, shapes = shapes, content = content)
+    MaterialTheme(colorScheme = scheme, shapes = shapes, typography = Typography().withFont(BodyFont), content = content)
 }
 
 @Composable
@@ -1389,7 +1414,7 @@ fun PlaylistsScreen(vm: PlayerVM, onOpen: (String) -> Unit) {
     var creating by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("PLAYLISTS", fontSize = 36.sp, fontWeight = FontWeight.Black, letterSpacing = (-1).sp, modifier = Modifier.weight(1f))
+            Text("PLAYLISTS", fontSize = 36.sp, fontWeight = FontWeight.Black, fontFamily = HeaderFont, letterSpacing = (-1).sp, modifier = Modifier.weight(1f))
             Btn({ creating = true }) { Text("New playlist") }
         }
         if (vm.playlists.isEmpty()) EmptyCard("NO PLAYLISTS YET", "Make your first one and start filling it.", "NEW PLAYLIST") { creating = true }
@@ -1527,7 +1552,7 @@ fun ArtistsScreen(vm: PlayerVM, nav: LibNav) {
     val ql = q.trim().lowercase()
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("LIBRARY", fontSize = 36.sp, fontWeight = FontWeight.Black, letterSpacing = (-1).sp, modifier = Modifier.weight(1f))
+            Text("LIBRARY", fontSize = 36.sp, fontWeight = FontWeight.Black, fontFamily = HeaderFont, letterSpacing = (-1).sp, modifier = Modifier.weight(1f))
             IconButton({ searching = !searching; if (!searching) q = "" }) { Icon(Icons.Rounded.Search, "Search") }
             IconButton({ if (vm.folders.isEmpty()) folderPicker.launch(null) else vm.scanFolders() }, enabled = !vm.scanning) {
                 Icon(Icons.Rounded.Refresh, "Scan music folders")
@@ -1552,7 +1577,7 @@ fun ArtistsScreen(vm: PlayerVM, nav: LibNav) {
         else if (ql.isEmpty()) Btn(
             { vm.play(vm.library.toList(), vm.library.indices.random(), true) },
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)
-        ) { Text("SHUFFLE ALL", fontWeight = FontWeight.Black, letterSpacing = 2.sp) }
+        ) { Text("SHUFFLE ALL", fontWeight = FontWeight.Black, fontFamily = HeaderFont, letterSpacing = 2.sp) }
         LazyColumn {
             if (ql.isEmpty()) {
                 itemsIndexed(artists, key = { _, a -> a.first.lowercase() }) { i, (n, ss) -> ArtistRow(vm, n, ss.size, i) { nav.artist = n; nav.album = null } }
@@ -1629,7 +1654,7 @@ fun ArtistPage(vm: PlayerVM, nav: LibNav, artist: String) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Art(vm.artistArt(artist), Modifier.size(96.dp), 300, RoundedCornerShape(2.dp), Icons.Rounded.Person)
                     Column(Modifier.padding(start = 16.dp)) {
-                        Text(artist, fontSize = 26.sp, fontWeight = FontWeight.Black, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(artist, fontSize = 26.sp, fontWeight = FontWeight.Black, fontFamily = HeaderFont, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         Text(
                             "${albums.size} ${if (albums.size == 1) "album" else "albums"} - ${songs.size} songs",
                             fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1678,7 +1703,7 @@ fun AlbumPage(vm: PlayerVM, nav: LibNav, artist: String, album: String) {
             item {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Art(songs.firstOrNull { it.art != null }?.art, Modifier.size(200.dp), 600)
-                    Text(album.ifBlank { "Singles & other" }, Modifier.padding(top = 12.dp), fontSize = 26.sp, fontWeight = FontWeight.Black)
+                    Text(album.ifBlank { "Singles & other" }, Modifier.padding(top = 12.dp), fontSize = 26.sp, fontWeight = FontWeight.Black, fontFamily = HeaderFont)
                     Text(artist, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
@@ -1700,7 +1725,7 @@ fun AlbumPage(vm: PlayerVM, nav: LibNav, artist: String, album: String) {
                         .padding(start = 12.dp, top = 8.dp, bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(if (s.track > 0) "${s.track}" else "${i + 1}", Modifier.width(32.dp), fontWeight = FontWeight.Black, color = subOn(s.uri in vm.selected, s.uri == vm.playingUri, MaterialTheme.colorScheme.onSurfaceVariant))
+                    Text(if (s.track > 0) "${s.track}" else "${i + 1}", Modifier.width(32.dp), fontWeight = FontWeight.Black, fontFamily = HeaderFont, color = subOn(s.uri in vm.selected, s.uri == vm.playingUri, MaterialTheme.colorScheme.onSurfaceVariant))
                     Column(Modifier.weight(1f)) {
                         Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold, color = fgOn(s.uri in vm.selected, s.uri == vm.playingUri))
                         if (s.artist.isNotBlank() && !s.artist.equals(artist, true))
@@ -1922,19 +1947,19 @@ fun SettingsScreen(vm: PlayerVM) {
     var confirm by remember { mutableStateOf(false) }
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { u -> if (u != null) vm.addFolder(u) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("SETTINGS", fontSize = 36.sp, fontWeight = FontWeight.Black, letterSpacing = (-1).sp)
-        Text("THEME", fontWeight = FontWeight.Black, letterSpacing = 1.sp)
+        Text("SETTINGS", fontSize = 36.sp, fontWeight = FontWeight.Black, fontFamily = HeaderFont, letterSpacing = (-1).sp)
+        Text("THEME", fontWeight = FontWeight.Black, fontFamily = HeaderFont, letterSpacing = 1.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("System", "Dark", "Light").forEachIndexed { i, n ->
                 Pill(vm.theme == i, { vm.setThemeMode(i) }, { Text(n) })
             }
         }
-        Text("SLEEP TIMER" + (if (vm.timerOn) " (ACTIVE)" else ""), fontWeight = FontWeight.Black, letterSpacing = 1.sp)
+        Text("SLEEP TIMER" + (if (vm.timerOn) " (ACTIVE)" else ""), fontWeight = FontWeight.Black, fontFamily = HeaderFont, letterSpacing = 1.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(15, 30, 60).forEach { m -> Pill(false, { vm.sleepTimer(m) }, { Text("$m min") }) }
             Pill(false, { vm.sleepTimer(0) }, { Text("Off") })
         }
-        Text("MUSIC FOLDERS", fontWeight = FontWeight.Black, letterSpacing = 1.sp)
+        Text("MUSIC FOLDERS", fontWeight = FontWeight.Black, fontFamily = HeaderFont, letterSpacing = 1.sp)
         if (vm.folders.isEmpty()) Text("No folders yet. Add one and the app will find your songs.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         vm.folders.toList().forEach { f ->
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1948,7 +1973,7 @@ fun SettingsScreen(vm: PlayerVM) {
                 Text(if (vm.scanning) "Scanning..." else "Scan now")
             }
         }
-        Text("APP UPDATES", fontWeight = FontWeight.Black, letterSpacing = 1.sp)
+        Text("APP UPDATES", fontWeight = FontWeight.Black, fontFamily = HeaderFont, letterSpacing = 1.sp)
         Text(
             vm.updateMsg.ifBlank { "Installed: build ${vm.installedBuild()}" },
             fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2009,7 +2034,7 @@ fun NowPlayingContent(vm: PlayerVM, onClose: () -> Unit, onLyrics: () -> Unit, f
         }
         item {
             Column(Modifier.padding(vertical = 16.dp)) {
-                Text(vm.title ?: "Nothing playing", fontSize = 28.sp, fontWeight = FontWeight.Black, lineHeight = 32.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(vm.title ?: "Nothing playing", fontSize = 28.sp, fontWeight = FontWeight.Black, fontFamily = HeaderFont, lineHeight = 32.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 if (vm.artist.isNotBlank()) Text(vm.artist, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = soft)
             }
         }
@@ -2027,8 +2052,8 @@ fun NowPlayingContent(vm: PlayerVM, onClose: () -> Unit, onLyrics: () -> Unit, f
                     onValueChangeFinished = { c?.seekTo(pos.toLong()); dragging = false }
                 )
                 Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(fmtTime(pos.toLong()), fontSize = 14.sp, fontWeight = FontWeight.Black, color = soft)
-                    Text(fmtTime(if (dur > 1f) dur.toLong() else 0L), fontSize = 14.sp, fontWeight = FontWeight.Black, color = soft)
+                    Text(fmtTime(pos.toLong()), fontSize = 14.sp, fontWeight = FontWeight.Black, fontFamily = HeaderFont, color = soft)
+                    Text(fmtTime(if (dur > 1f) dur.toLong() else 0L), fontSize = 14.sp, fontWeight = FontWeight.Black, fontFamily = HeaderFont, color = soft)
                 }
             }
         }
@@ -2053,10 +2078,10 @@ fun NowPlayingContent(vm: PlayerVM, onClose: () -> Unit, onLyrics: () -> Unit, f
         }
         item {
             OBtn({ onLyrics() }, Modifier.fillMaxWidth().padding(top = 16.dp)) {
-                Text("LYRICS", fontWeight = FontWeight.Black, letterSpacing = 2.sp)
+                Text("LYRICS", fontWeight = FontWeight.Black, fontFamily = HeaderFont, letterSpacing = 2.sp)
             }
         }
-        item { Text("QUEUE", Modifier.padding(top = 20.dp, bottom = 8.dp), fontSize = 20.sp, fontWeight = FontWeight.Black, letterSpacing = 1.sp) }
+        item { Text("QUEUE", Modifier.padding(top = 20.dp, bottom = 8.dp), fontSize = 20.sp, fontWeight = FontWeight.Black, fontFamily = HeaderFont, letterSpacing = 1.sp) }
         itemsIndexed(vm.queue) { i, q ->
             Row(
                 Modifier.fillMaxWidth().padding(start = 0.dp, end = 6.dp, top = 4.dp, bottom = 6.dp)
@@ -2092,7 +2117,7 @@ fun LyricsScreen(vm: PlayerVM, onClose: () -> Unit) {
                     Row(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClose) { Icon(Icons.Rounded.KeyboardArrowDown, "Close") }
                         Column(Modifier.weight(1f)) {
-                            Text(vm.title ?: "", fontWeight = FontWeight.Black, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(vm.title ?: "", fontWeight = FontWeight.Black, fontFamily = HeaderFont, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             if (vm.artist.isNotBlank()) Text(vm.artist, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                         }
                     }
@@ -2106,7 +2131,7 @@ fun LyricsScreen(vm: PlayerVM, onClose: () -> Unit) {
                             val on = i == cur
                             val bgc by animateColorAsState(if (on) Red else Color.Black, tween(200), label = "lineBg")
                             Text(
-                                l.text.ifBlank { "..." }, fontSize = 26.sp, fontWeight = FontWeight.Black, lineHeight = 32.sp,
+                                l.text.ifBlank { "..." }, fontSize = 26.sp, fontWeight = FontWeight.Black, fontFamily = BodyFont, lineHeight = 32.sp,
                                 color = if (on) Color.White else gray,
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).background(bgc)
                                     .clickable { vm.controller?.seekTo(l.t) }.padding(horizontal = 12.dp, vertical = 10.dp)
@@ -2119,8 +2144,8 @@ fun LyricsScreen(vm: PlayerVM, onClose: () -> Unit) {
                     }
                 }
                 else -> Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    Text("NO LYRICS FOUND", fontSize = 22.sp, fontWeight = FontWeight.Black, color = gray)
-                    OBtn({ vm.loadLyrics(true) }, Modifier.padding(top = 16.dp)) { Text("TRY AGAIN", fontWeight = FontWeight.Black, letterSpacing = 1.sp) }
+                    Text("NO LYRICS FOUND", fontSize = 22.sp, fontWeight = FontWeight.Black, fontFamily = HeaderFont, color = gray)
+                    OBtn({ vm.loadLyrics(true) }, Modifier.padding(top = 16.dp)) { Text("TRY AGAIN", fontWeight = FontWeight.Black, fontFamily = HeaderFont, letterSpacing = 1.sp) }
                 }
             }
         }
@@ -2183,7 +2208,7 @@ fun OBtn(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = 
 @Composable
 fun Footer(text: String) =
     Text(
-        text, Modifier.fillMaxWidth().padding(24.dp), fontSize = 12.sp, fontWeight = FontWeight.Black,
+        text, Modifier.fillMaxWidth().padding(24.dp), fontSize = 12.sp, fontWeight = FontWeight.Black, fontFamily = HeaderFont,
         letterSpacing = 2.sp, color = Color(0xFF8C8C8C), textAlign = TextAlign.Center
     )
 
@@ -2198,8 +2223,8 @@ fun EmptyCard(title: String, sub: String, button: String, onClick: () -> Unit) {
             .border(3.dp, MaterialTheme.colorScheme.onSurface, RoundedCornerShape(4.dp))
             .padding(20.dp)
     ) {
-        Text(title, fontSize = 28.sp, fontWeight = FontWeight.Black, lineHeight = 30.sp)
+        Text(title, fontSize = 28.sp, fontWeight = FontWeight.Black, fontFamily = HeaderFont, lineHeight = 30.sp)
         Text(sub, Modifier.padding(top = 6.dp, bottom = 16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Btn(onClick, Modifier.fillMaxWidth()) { Text(button, fontWeight = FontWeight.Black, letterSpacing = 1.sp) }
+        Btn(onClick, Modifier.fillMaxWidth()) { Text(button, fontWeight = FontWeight.Black, fontFamily = HeaderFont, letterSpacing = 1.sp) }
     }
 }
